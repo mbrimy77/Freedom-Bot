@@ -2,7 +2,7 @@
 
 ## ✅ GitHub Push Complete!
 
-Your code is now at: https://github.com/mbrimy77/MSOS---Freedom
+Your code is now at: https://github.com/mbrimy77/Freedom-Bot
 
 The repository now contains:
 - ✅ NVDA Bot (`/nvda_bot/`)
@@ -24,7 +24,7 @@ The repository now contains:
 
 1. Click "**New Project**" button (top right)
 2. Select "**Deploy from GitHub repo**"
-3. Choose `mbrimy77/MSOS---Freedom` from the list
+3. Choose `mbrimy77/Freedom-Bot` from the list
 4. Railway will start creating the project
 
 ### Step 3: Configure NVDA Bot (First Service)
@@ -69,7 +69,7 @@ Now let's add the MSOS bot as a second service:
 1. Go back to project view (click project name at top)
 2. Click "**+ New**" button
 3. Select "**GitHub Repo**"
-4. Choose `mbrimy77/MSOS---Freedom` again (yes, same repo!)
+4. Choose `mbrimy77/Freedom-Bot` again (yes, same repo!)
 5. Railway creates a second service
 
 **B. Service Settings:**
@@ -104,7 +104,7 @@ Now let's add the MSOS bot as a second service:
 **Your Railway Dashboard should now show:**
 
 ```
-MSOS---Freedom (Project)
+Freedom-Bot (Project)
 ├── nvda-bot (Service)
 │   ├── Status: Deployed
 │   ├── Root: /nvda_bot
@@ -326,7 +326,7 @@ Track in a spreadsheet:
 - Docs: https://alpaca.markets/docs/
 
 **GitHub Issues:**
-- Create issue at: https://github.com/mbrimy77/MSOS---Freedom/issues
+- Create issue at: https://github.com/mbrimy77/Freedom-Bot/issues
 
 ---
 
