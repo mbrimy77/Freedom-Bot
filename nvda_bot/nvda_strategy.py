@@ -122,6 +122,73 @@ class NVDAOpeningRangeBot:
         """Get current time in CST timezone"""
         return datetime.now(TIMEZONE_CST).time()
     
+    def is_market_open(self):
+        """Check if market is open (Monday-Friday, 9:30 AM - 4:00 PM ET)"""
+        now_et = datetime.now(TIMEZONE_ET)
+        
+        # Check if weekend
+        if now_et.weekday() >= 5:  # Saturday = 5, Sunday = 6
+            return False
+        
+        # Check if within market hours (9:30 AM - 4:00 PM ET)
+        market_open = time(9, 30)
+        market_close = time(16, 0)
+        
+        if market_open <= now_et.time() <= market_close:
+            return True
+        
+        return False
+    
+    async def wait_for_market_open(self):
+        """Wait until market opens (9:30 AM ET on next trading day)"""
+        while True:
+            now_et = datetime.now(TIMEZONE_ET)
+            
+            # Check if weekend
+            if now_et.weekday() >= 5:  # Saturday or Sunday
+                # Wait until Monday 9:30 AM
+                days_until_monday = (7 - now_et.weekday()) % 7
+                if days_until_monday == 0:
+                    days_until_monday = 1  # If Sunday, wait 1 day
+                
+                next_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
+                wait_seconds = (next_open - now_et).total_seconds()
+                
+                print(f"[{self._get_timestamp_et()}] Market closed (weekend)")
+                print(f"[{self._get_timestamp_et()}] Waiting until Monday {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                
+                # Sleep in chunks to avoid blocking
+                await asyncio.sleep(min(wait_seconds, 3600))  # Sleep max 1 hour at a time
+                continue
+            
+            # Check if before market open today
+            market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            
+            if now_et < market_open_time:
+                wait_seconds = (market_open_time - now_et).total_seconds()
+                print(f"[{self._get_timestamp_et()}] Market opens at 9:30 AM ET")
+                print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds...")
+                await asyncio.sleep(min(wait_seconds, 3600))
+                continue
+            
+            # Check if after market close
+            market_close_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
+            
+            if now_et > market_close_time:
+                # Market closed for today, wait until tomorrow 9:30 AM
+                next_open = market_open_time + timedelta(days=1)
+                wait_seconds = (next_open - now_et).total_seconds()
+                
+                print(f"[{self._get_timestamp_et()}] Market closed for today")
+                print(f"[{self._get_timestamp_et()}] Waiting until tomorrow {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                
+                await asyncio.sleep(min(wait_seconds, 3600))
+                continue
+            
+            # Market is open!
+            print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
+            return
+    
     async def establish_opening_range(self):
         """Fetch 15-minute opening range (9:30-9:45 AM ET)"""
         print(f"\n[{self._get_timestamp_et()}] Establishing 15-minute Opening Range...")
@@ -529,6 +596,9 @@ class NVDAOpeningRangeBot:
         print(f"\n{'='*70}")
         print(f"NVDA 15-MIN OPENING RANGE BREAKOUT BOT STARTED")
         print(f"{'='*70}\n")
+        
+        # Wait for market to open
+        await self.wait_for_market_open()
         
         # Establish opening range
         if not await self.establish_opening_range():

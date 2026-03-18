@@ -402,11 +402,78 @@ class MomentumTradingBot:
         except Exception as e:
             print(f"[{self._get_timestamp()}] ERROR in handle_smso_trade: {e}")
     
+    def is_market_open(self):
+        """Check if market is open (Monday-Friday, 9:30 AM - 4:00 PM CT)"""
+        now_ct = datetime.now(TIMEZONE)
+        
+        # Check if weekend
+        if now_ct.weekday() >= 5:  # Saturday = 5, Sunday = 6
+            return False
+        
+        # Check if within market hours (9:30 AM ET = 8:30 AM CT to 4:00 PM ET = 3:00 PM CT)
+        market_open = time(8, 30)  # 9:30 AM ET
+        market_close = time(15, 0)  # 4:00 PM ET
+        
+        if market_open <= now_ct.time() <= market_close:
+            return True
+        
+        return False
+    
+    async def wait_for_trading_window(self):
+        """Wait until MSOS trading window (2:15 PM CT)"""
+        while True:
+            now_ct = datetime.now(TIMEZONE)
+            
+            # Check if weekend
+            if now_ct.weekday() >= 5:
+                # Wait until Monday 2:15 PM CT
+                days_until_monday = (7 - now_ct.weekday()) % 7
+                if days_until_monday == 0:
+                    days_until_monday = 1
+                
+                next_open = now_ct.replace(hour=14, minute=15, second=0, microsecond=0) + timedelta(days=days_until_monday)
+                wait_seconds = (next_open - now_ct).total_seconds()
+                
+                print(f"[{self._get_timestamp()}] Market closed (weekend)")
+                print(f"[{self._get_timestamp()}] Waiting until Monday {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                
+                await asyncio.sleep(min(wait_seconds, 3600))
+                continue
+            
+            # Check if before trading window today (2:15 PM CT)
+            trading_start = now_ct.replace(hour=14, minute=15, second=0, microsecond=0)
+            
+            if now_ct < trading_start:
+                wait_seconds = (trading_start - now_ct).total_seconds()
+                print(f"[{self._get_timestamp()}] MSOS trading window starts at 2:15 PM CT")
+                print(f"[{self._get_timestamp()}] Waiting {wait_seconds:.0f} seconds...")
+                await asyncio.sleep(min(wait_seconds, 3600))
+                continue
+            
+            # Check if after exit time (2:58 PM CT)
+            if now_ct.time() >= EXIT_TIME:
+                # Wait until tomorrow
+                next_open = trading_start + timedelta(days=1)
+                wait_seconds = (next_open - now_ct).total_seconds()
+                
+                print(f"[{self._get_timestamp()}] Trading window closed for today")
+                print(f"[{self._get_timestamp()}] Waiting until tomorrow {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+                
+                await asyncio.sleep(min(wait_seconds, 3600))
+                continue
+            
+            # Trading window is open!
+            print(f"[{self._get_timestamp()}] Trading window is open - ready to trade")
+            return
+    
     async def run(self):
         """Main bot loop"""
         print(f"\n{'='*60}")
         print(f"MOMENTUM TRADING BOT STARTED")
         print(f"{'='*60}\n")
+        
+        # Wait for trading window
+        await self.wait_for_trading_window()
         
         # Fetch previous close
         if await self.fetch_previous_close() is None:
