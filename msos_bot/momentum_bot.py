@@ -259,15 +259,30 @@ class MomentumTradingBot:
         return False
     
     async def close_all_positions(self):
-        """Close all positions at exit time"""
+        """Close all positions at exit time and log final P&L"""
         try:
             print(f"\n[{self._get_timestamp()}] CLOSING ALL POSITIONS (Hard Exit)")
             positions = self.trading_client.get_all_positions()
             
             for position in positions:
                 if position.symbol in [TRADE_TICKER, INVERSE_TICKER]:
+                    # Log final P&L before closing
+                    final_pl = float(position.unrealized_pl)
+                    final_pl_pct = float(position.unrealized_plpc) * 100
+                    current_price = float(position.current_price)
+                    qty = float(position.qty)
+                    
+                    print(f"[{self._get_timestamp()}] === FINAL TRADE SUMMARY ===")
+                    print(f"[{self._get_timestamp()}] Symbol: {position.symbol}")
+                    print(f"[{self._get_timestamp()}] Entry Price: ${self.entry_price:.2f}")
+                    print(f"[{self._get_timestamp()}] Exit Price: ${current_price:.2f}")
+                    print(f"[{self._get_timestamp()}] Shares/Notional: {int(qty)} shares")
+                    print(f"[{self._get_timestamp()}] Final P&L: ${final_pl:.2f} ({final_pl_pct:+.2f}%)")
+                    print(f"[{self._get_timestamp()}] ==========================")
+                    
+                    # Close the position
                     self.trading_client.close_position(position.symbol)
-                    print(f"[{self._get_timestamp()}] Closed position: {position.symbol}")
+                    print(f"[{self._get_timestamp()}] Position closed successfully")
             
             self.position_entered = False
             self.position_side = None

@@ -418,15 +418,30 @@ class NVDAOpeningRangeBot:
             print(f"[{self._get_timestamp_et()}] ERROR checking profit target: {e}")
     
     async def close_all_positions(self, reason=""):
-        """Close all positions"""
+        """Close all positions and log final P&L"""
         try:
             print(f"\n[{self._get_timestamp_et()}] CLOSING ALL POSITIONS - {reason}")
             positions = self.trading_client.get_all_positions()
             
             for position in positions:
                 if position.symbol in [LONG_TICKER, SHORT_TICKER]:
+                    # Log final P&L before closing
+                    final_pl = float(position.unrealized_pl)
+                    final_pl_pct = float(position.unrealized_plpc) * 100
+                    current_price = float(position.current_price)
+                    qty = float(position.qty)
+                    
+                    print(f"[{self._get_timestamp_et()}] === FINAL TRADE SUMMARY ===")
+                    print(f"[{self._get_timestamp_et()}] Symbol: {position.symbol}")
+                    print(f"[{self._get_timestamp_et()}] Entry Price: ${self.entry_price:.2f}")
+                    print(f"[{self._get_timestamp_et()}] Exit Price: ${current_price:.2f}")
+                    print(f"[{self._get_timestamp_et()}] Shares: {int(qty)}")
+                    print(f"[{self._get_timestamp_et()}] Final P&L: ${final_pl:.2f} ({final_pl_pct:+.2f}%)")
+                    print(f"[{self._get_timestamp_et()}] ==========================")
+                    
+                    # Close the position
                     self.trading_client.close_position(position.symbol)
-                    print(f"[{self._get_timestamp_et()}] Closed position: {position.symbol}")
+                    print(f"[{self._get_timestamp_et()}] Position closed successfully")
             
             # Cancel any pending orders
             try:
