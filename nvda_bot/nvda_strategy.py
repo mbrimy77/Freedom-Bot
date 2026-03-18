@@ -223,7 +223,7 @@ class NVDAOpeningRangeBot:
                 self.orb_low = min([float(bar.low) for bar in bar_list])
                 self.orb_established = True
                 
-                print(f"[{self._get_timestamp_et()}] ✓ Opening Range Established (9:30-9:45 AM ET)")
+                print(f"[{self._get_timestamp_et()}] Opening Range Established (9:30-9:45 AM ET)")
                 print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
                 print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
                 print(f"[{self._get_timestamp_et()}] ORB Range: ${self.orb_high - self.orb_low:.2f}")
@@ -312,7 +312,7 @@ class NVDAOpeningRangeBot:
             )
             
             order = self.trading_client.submit_order(order_data)
-            print(f"[{self._get_timestamp_et()}] ✓ Order submitted - Order ID: {order.id}")
+            print(f"[{self._get_timestamp_et()}] Order submitted - Order ID: {order.id}")
             
             self.position_entered = True
             self.position_side = 'long' if side == OrderSide.BUY else 'short'
@@ -384,14 +384,14 @@ class NVDAOpeningRangeBot:
             
             # Check if profit target hit
             if unrealized_pl >= (ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100):
-                print(f"\n[{self._get_timestamp_et()}] 🎯 PROFIT TARGET HIT! ${unrealized_pl:.2f} >= ${ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100:.2f}")
+                print(f"\n[{self._get_timestamp_et()}] PROFIT TARGET HIT! ${unrealized_pl:.2f} >= ${ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100:.2f}")
                 print(f"[{self._get_timestamp_et()}] Upgrading to {TRAILING_STOP_PCT}% Trailing Stop...")
                 
                 # Cancel existing stop loss
                 if self.stop_loss_order_id:
                     try:
                         self.trading_client.cancel_order_by_id(self.stop_loss_order_id)
-                        print(f"[{self._get_timestamp_et()}] ✓ Hard stop canceled")
+                        print(f"[{self._get_timestamp_et()}] Hard stop canceled")
                     except Exception as e:
                         print(f"[{self._get_timestamp_et()}] ERROR canceling stop: {e}")
                 
@@ -409,7 +409,7 @@ class NVDAOpeningRangeBot:
                     self.stop_loss_order_id = trailing_order.id
                     self.profit_target_hit = True
                     
-                    print(f"[{self._get_timestamp_et()}] ✓ Trailing Stop activated - Order ID: {trailing_order.id}")
+                    print(f"[{self._get_timestamp_et()}] Trailing Stop activated - Order ID: {trailing_order.id}")
                     
                 except Exception as e:
                     print(f"[{self._get_timestamp_et()}] ERROR placing trailing stop: {e}")
@@ -426,12 +426,12 @@ class NVDAOpeningRangeBot:
             for position in positions:
                 if position.symbol in [LONG_TICKER, SHORT_TICKER]:
                     self.trading_client.close_position(position.symbol)
-                    print(f"[{self._get_timestamp_et()}] ✓ Closed position: {position.symbol}")
+                    print(f"[{self._get_timestamp_et()}] Closed position: {position.symbol}")
             
             # Cancel any pending orders
             try:
                 self.trading_client.cancel_orders()
-                print(f"[{self._get_timestamp_et()}] ✓ All pending orders canceled")
+                print(f"[{self._get_timestamp_et()}] All pending orders canceled")
             except:
                 pass
             
@@ -503,13 +503,13 @@ class NVDAOpeningRangeBot:
             
             # Long entry: 5-min close above ORB high
             if self.current_5min_close > self.orb_high:
-                print(f"\n[{self._get_timestamp_et()}] 🚀 LONG BREAKOUT DETECTED!")
+                print(f"\n[{self._get_timestamp_et()}] LONG BREAKOUT DETECTED!")
                 print(f"[{self._get_timestamp_et()}] 5-min Close: ${self.current_5min_close:.2f} > ORB High: ${self.orb_high:.2f}")
                 await self.place_trade_with_stop(LONG_TICKER, OrderSide.BUY, self.current_5min_close)
             
             # Short entry: 5-min close below ORB low
             elif self.current_5min_close < self.orb_low:
-                print(f"\n[{self._get_timestamp_et()}] 🔻 SHORT BREAKOUT DETECTED!")
+                print(f"\n[{self._get_timestamp_et()}] SHORT BREAKOUT DETECTED!")
                 print(f"[{self._get_timestamp_et()}] 5-min Close: ${self.current_5min_close:.2f} < ORB Low: ${self.orb_low:.2f}")
                 await self.place_trade_with_stop(SHORT_TICKER, OrderSide.BUY, self.current_5min_close)
         
@@ -622,9 +622,9 @@ class NVDAOpeningRangeBot:
         self.stream.subscribe_trades(self.handle_nvdl_trade, LONG_TICKER)
         self.stream.subscribe_trades(self.handle_nvd_trade, SHORT_TICKER)
         
-        print(f"[{self._get_timestamp_et()}] ✓ Subscribed to {MONITOR_TICKER} live bar stream (entry signals)")
-        print(f"[{self._get_timestamp_et()}] ✓ Subscribed to {LONG_TICKER} live trade stream (long position monitoring)")
-        print(f"[{self._get_timestamp_et()}] ✓ Subscribed to {SHORT_TICKER} live trade stream (short position monitoring)")
+        print(f"[{self._get_timestamp_et()}] Subscribed to {MONITOR_TICKER} live bar stream (entry signals)")
+        print(f"[{self._get_timestamp_et()}] Subscribed to {LONG_TICKER} live trade stream (long position monitoring)")
+        print(f"[{self._get_timestamp_et()}] Subscribed to {SHORT_TICKER} live trade stream (short position monitoring)")
         print(f"[{self._get_timestamp_et()}] Waiting for breakout signals...\n")
         
         # Run the stream
