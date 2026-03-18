@@ -1,0 +1,64 @@
+# Environment variables
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+anaconda3/
+
+# IDE
+.vscode/
+.cursor/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Old files (keep in git history but ignore changes)
+momentum_bot.py
+test_connection.py
+
+# Windows/Desktop folders
+Desktop/
+Documents/
+Downloads/
+OneDrive/
+AppData/
+
+# Other projects
+momentum-bot/
+stock-viewer/
+Insidr-Finance-main/
