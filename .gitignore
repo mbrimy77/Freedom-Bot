@@ -48,7 +48,6 @@ Thumbs.db
 desktop.ini
 
 # Old files (keep in git history but ignore changes)
-momentum_bot.py
 test_connection.py
 
 # Windows/Desktop folders
