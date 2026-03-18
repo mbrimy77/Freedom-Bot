@@ -156,7 +156,7 @@ class BotTester:
             return False
     
     async def test_5_asset_check(self):
-        """Test 5: Check MSOX and SMSO availability"""
+        """Test 5: Check MSOX availability (LONG only)"""
         print("\n[TEST 5] Testing Asset Availability...")
         try:
             # Check MSOX
@@ -166,16 +166,15 @@ class BotTester:
             print(f"  MSOX Shortable: {msox.shortable}")
             print(f"  MSOX Easy to Borrow: {msox.easy_to_borrow}")
             
-            # Check SMSO
-            smso = self.trading_client.get_asset("SMSO")
-            print(f"  SMSO Status: {smso.status}")
-            print(f"  SMSO Tradable: {smso.tradable}")
+            if not msox.shortable:
+                print(f"  NOTE: MSOX is NOT shortable - bot will only trade LONG signals")
+                print(f"  NOTE: Inverse ticker SMSO does not exist on Alpaca")
             
-            if msox.tradable and smso.tradable:
-                print(f"  SUCCESS: Both tickers are tradable")
+            if msox.tradable:
+                print(f"  SUCCESS: MSOX is tradable for LONG positions")
                 return True
             else:
-                print(f"  WARNING: One or both tickers not tradable")
+                print(f"  FAILED: MSOX is not tradable")
                 return False
         except Exception as e:
             print(f"  FAILED: {e}")

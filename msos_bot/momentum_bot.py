@@ -77,8 +77,8 @@ class MomentumTradingBot:
         print(f"[{self._get_timestamp()}] Bot initialized")
         print(f"[{self._get_timestamp()}] Monitor Ticker: {MONITOR_TICKER}")
         print(f"[{self._get_timestamp()}] Trade Ticker: {TRADE_TICKER}")
-        print(f"[{self._get_timestamp()}] Inverse Ticker: {INVERSE_TICKER}")
         print(f"[{self._get_timestamp()}] Paper Trading: Enabled")
+        print(f"[{self._get_timestamp()}] NOTE: {TRADE_TICKER} is not shortable - bot will only trade LONG signals")
     
     def _get_timestamp(self):
         """Get current timestamp in CT"""
@@ -341,8 +341,10 @@ class MomentumTradingBot:
                         print(f"[{self._get_timestamp()}] {TRADE_TICKER} is shortable and easy to borrow - Shorting {TRADE_TICKER}")
                         await self.place_trade(OrderSide.SELL, TRADE_TICKER)
                     else:
-                        print(f"[{self._get_timestamp()}] {TRADE_TICKER} is NOT shortable/easy to borrow - Buying {INVERSE_TICKER} instead")
-                        await self.place_trade(OrderSide.BUY, INVERSE_TICKER)
+                        print(f"[{self._get_timestamp()}] WARNING: {TRADE_TICKER} is NOT shortable")
+                        print(f"[{self._get_timestamp()}] Inverse ticker {INVERSE_TICKER} does not exist on Alpaca")
+                        print(f"[{self._get_timestamp()}] SKIPPING short entry - bot only trades long signals")
+                        self.was_stopped_out = True  # Prevent further entries today
         
         except Exception as e:
             print(f"[{self._get_timestamp()}] ERROR in handle_msos_trade: {e}")
