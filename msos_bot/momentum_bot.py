@@ -28,9 +28,8 @@ from alpaca.data.timeframe import TimeFrame
 load_dotenv()
 
 # Configuration
-MONITOR_TICKER = "MSOS"  # Ticker to monitor for signals
-TRADE_TICKER = "MSOX"    # Ticker to trade
-INVERSE_TICKER = "SMSO"  # 1x Inverse ticker (fallback if MSOX not shortable)
+MONITOR_TICKER = "MSOS"  # Ticker to monitor for signals AND short for negative momentum
+TRADE_TICKER = "MSOX"    # Ticker to trade for LONG signals (3x leveraged)
 NOTIONAL_AMOUNT = 20000  # $20,000 per trade
 TRIGGER_THRESHOLD = 2.5  # +/- 2.5% trigger
 TRAILING_STOP_PCT = 1.0  # 1.0% trailing stop
@@ -76,9 +75,9 @@ class MomentumTradingBot:
         
         print(f"[{self._get_timestamp()}] Bot initialized")
         print(f"[{self._get_timestamp()}] Monitor Ticker: {MONITOR_TICKER}")
-        print(f"[{self._get_timestamp()}] Trade Ticker: {TRADE_TICKER}")
+        print(f"[{self._get_timestamp()}] Long Trade Ticker: {TRADE_TICKER} (3x leveraged)")
+        print(f"[{self._get_timestamp()}] Short Trade Ticker: {MONITOR_TICKER} (will short if ETB)")
         print(f"[{self._get_timestamp()}] Paper Trading: Enabled")
-        print(f"[{self._get_timestamp()}] NOTE: {TRADE_TICKER} is not shortable - bot will only trade LONG signals")
     
     def _get_timestamp(self):
         """Get current timestamp in CT"""
@@ -135,11 +134,11 @@ class MomentumTradingBot:
             return None
     
     def check_existing_position(self):
-        """Check if a position already exists for MSOX or SMSO"""
+        """Check if a position already exists for MSOX or MSOS"""
         try:
             positions = self.trading_client.get_all_positions()
             for position in positions:
-                if position.symbol in [TRADE_TICKER, INVERSE_TICKER]:
+                if position.symbol in [TRADE_TICKER, MONITOR_TICKER]:
                     qty = float(position.qty)
                     print(f"[{self._get_timestamp()}] Existing position found: {position.symbol} - {qty} shares")
                     return True
@@ -265,7 +264,7 @@ class MomentumTradingBot:
             positions = self.trading_client.get_all_positions()
             
             for position in positions:
-                if position.symbol in [TRADE_TICKER, INVERSE_TICKER]:
+                if position.symbol in [TRADE_TICKER, MONITOR_TICKER]:
                     # Log final P&L before closing
                     final_pl = float(position.unrealized_pl)
                     final_pl_pct = float(position.unrealized_plpc) * 100
@@ -294,7 +293,7 @@ class MomentumTradingBot:
             print(f"[{self._get_timestamp()}] ERROR closing positions: {e}")
     
     async def handle_msos_trade(self, data):
-        """Handle incoming MSOS trade data - used for entry triggers"""
+        """Handle incoming MSOS trade data - used for entry triggers AND short position monitoring"""
         try:
             current_time = self._get_current_time_ct()
             self.msos_current_price = float(data.price)
@@ -303,6 +302,21 @@ class MomentumTradingBot:
             pct_change = self.calculate_percent_change(self.msos_current_price)
             
             print(f"[{self._get_timestamp()}] {MONITOR_TICKER} Trade: ${self.msos_current_price:.2f} | Change: {pct_change:+.2f}%")
+            
+            # If we have a SHORT position in MSOS, manage trailing stop
+            if self.position_entered and self.active_ticker == MONITOR_TICKER:
+                self.update_trailing_stop(self.msos_current_price)
+                
+                # Check if trailing stop hit for short MSOS position
+                if self.check_trailing_stop_hit(self.msos_current_price):
+                    self.was_stopped_out = True
+                    await self.close_all_positions()
+                    return
+                
+                # Periodic logging for MSOS short position
+                if self.should_log_periodic_update():
+                    if self.position_side == 'short':
+                        print(f"[{self._get_timestamp()}] >>> {MONITOR_TICKER} Lowest Price Seen: ${self.lowest_price_since_entry:.2f} | Current: ${self.msos_current_price:.2f} | Stop: ${self.trailing_stop_price:.2f}")
             
             # Check for exit time
             if current_time >= EXIT_TIME:
@@ -336,14 +350,13 @@ class MomentumTradingBot:
                 elif pct_change <= -TRIGGER_THRESHOLD:
                     print(f"[{self._get_timestamp()}] SHORT TRIGGER: {pct_change:+.2f}% <= -{TRIGGER_THRESHOLD}%")
                     
-                    # Check if MSOX is shortable and easy to borrow
-                    if self.check_shortability(TRADE_TICKER):
-                        print(f"[{self._get_timestamp()}] {TRADE_TICKER} is shortable and easy to borrow - Shorting {TRADE_TICKER}")
-                        await self.place_trade(OrderSide.SELL, TRADE_TICKER)
+                    # Check if MSOS is shortable and easy to borrow
+                    if self.check_shortability(MONITOR_TICKER):
+                        print(f"[{self._get_timestamp()}] {MONITOR_TICKER} is shortable and easy to borrow - Shorting {MONITOR_TICKER}")
+                        await self.place_trade(OrderSide.SELL, MONITOR_TICKER)
                     else:
-                        print(f"[{self._get_timestamp()}] WARNING: {TRADE_TICKER} is NOT shortable")
-                        print(f"[{self._get_timestamp()}] Inverse ticker {INVERSE_TICKER} does not exist on Alpaca")
-                        print(f"[{self._get_timestamp()}] SKIPPING short entry - bot only trades long signals")
+                        print(f"[{self._get_timestamp()}] WARNING: {MONITOR_TICKER} is NOT shortable or ETB")
+                        print(f"[{self._get_timestamp()}] SKIPPING short entry")
                         self.was_stopped_out = True  # Prevent further entries today
         
         except Exception as e:
@@ -385,39 +398,6 @@ class MomentumTradingBot:
         except Exception as e:
             print(f"[{self._get_timestamp()}] ERROR in handle_msox_trade: {e}")
     
-    async def handle_smso_trade(self, data):
-        """Handle incoming SMSO trade data - used for trailing stop management when trading inverse"""
-        try:
-            current_time = self._get_current_time_ct()
-            smso_current_price = float(data.price)
-            
-            # Only process if we have a position AND we're trading SMSO (not MSOX)
-            if not self.position_entered or self.active_ticker != INVERSE_TICKER:
-                return
-            
-            # Check for exit time
-            if current_time >= EXIT_TIME:
-                await self.close_all_positions()
-                print(f"[{self._get_timestamp()}] Exit time reached. Bot stopping.")
-                await self.stream.stop_ws()
-                return
-            
-            # Update trailing stop based on SMSO price
-            self.update_trailing_stop(smso_current_price)
-            
-            # Check if trailing stop hit
-            if self.check_trailing_stop_hit(smso_current_price):
-                self.was_stopped_out = True
-                await self.close_all_positions()
-                return
-            
-            # Periodic logging every 30 seconds
-            if self.should_log_periodic_update():
-                if self.position_side == 'long':
-                    print(f"[{self._get_timestamp()}] >>> {INVERSE_TICKER} Highest Price Seen: ${self.highest_price_since_entry:.2f} | Current: ${smso_current_price:.2f} | Stop: ${self.trailing_stop_price:.2f}")
-        
-        except Exception as e:
-            print(f"[{self._get_timestamp()}] ERROR in handle_smso_trade: {e}")
     
     def is_market_open(self):
         """Check if market is open (Monday-Friday, 9:30 AM - 4:00 PM CT)"""
@@ -508,14 +488,14 @@ class MomentumTradingBot:
         print(f"[{self._get_timestamp()}] Hard Exit: {EXIT_TIME} CT")
         print(f"[{self._get_timestamp()}] Trailing Stop: {TRAILING_STOP_PCT}%\n")
         
-        # Subscribe to live trade data for all tickers
+        # Subscribe to live trade data
+        # MSOS stream: Used for entry triggers AND short position monitoring
+        # MSOX stream: Used for long position monitoring
         self.stream.subscribe_trades(self.handle_msos_trade, MONITOR_TICKER)
         self.stream.subscribe_trades(self.handle_msox_trade, TRADE_TICKER)
-        self.stream.subscribe_trades(self.handle_smso_trade, INVERSE_TICKER)
         
-        print(f"[{self._get_timestamp()}] Subscribed to {MONITOR_TICKER} live trade stream (entry triggers)")
-        print(f"[{self._get_timestamp()}] Subscribed to {TRADE_TICKER} live trade stream (trailing stop)")
-        print(f"[{self._get_timestamp()}] Subscribed to {INVERSE_TICKER} live trade stream (trailing stop - inverse)")
+        print(f"[{self._get_timestamp()}] Subscribed to {MONITOR_TICKER} live trade stream (entry triggers + short position)")
+        print(f"[{self._get_timestamp()}] Subscribed to {TRADE_TICKER} live trade stream (long position)")
         print(f"[{self._get_timestamp()}] Monitoring for signals...\n")
         
         # Run the stream
