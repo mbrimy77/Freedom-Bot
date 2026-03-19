@@ -156,25 +156,33 @@ class BotTester:
             return False
     
     async def test_5_asset_check(self):
-        """Test 5: Check MSOX availability (LONG only)"""
+        """Test 5: Check if MSOX (long) and MSOS (short) are available"""
         print("\n[TEST 5] Testing Asset Availability...")
         try:
-            # Check MSOX
+            # Check MSOX availability for LONG trades
             msox = self.trading_client.get_asset("MSOX")
-            print(f"  MSOX Status: {msox.status}")
+            print(f"  MSOX (LONG) Status: {msox.status}")
             print(f"  MSOX Tradable: {msox.tradable}")
-            print(f"  MSOX Shortable: {msox.shortable}")
-            print(f"  MSOX Easy to Borrow: {msox.easy_to_borrow}")
             
-            if not msox.shortable:
-                print(f"  NOTE: MSOX is NOT shortable - bot will only trade LONG signals")
-                print(f"  NOTE: Inverse ticker SMSO does not exist on Alpaca")
+            # Check MSOS availability for SHORT trades
+            msos = self.trading_client.get_asset("MSOS")
+            print(f"  MSOS (SHORT) Status: {msos.status}")
+            print(f"  MSOS Shortable: {msos.shortable}")
+            print(f"  MSOS Easy to Borrow: {msos.easy_to_borrow}")
             
-            if msox.tradable:
-                print(f"  SUCCESS: MSOX is tradable for LONG positions")
+            # Verify both are available
+            if msox.tradable and msos.shortable:
+                print(f"  SUCCESS: MSOX is tradable for LONG, MSOS is shortable for SHORT")
+                print(f"  Bot can trade both directions:")
+                print(f"    - LONG signal (+2.5%): Buy MSOX")
+                print(f"    - SHORT signal (-2.5%): Short MSOS")
                 return True
             else:
-                print(f"  FAILED: MSOX is not tradable")
+                print(f"  WARNING: One or both tickers not fully available")
+                if not msox.tradable:
+                    print(f"    - MSOX is not tradable for LONG")
+                if not msos.shortable:
+                    print(f"    - MSOS is not shortable for SHORT")
                 return False
         except Exception as e:
             print(f"  FAILED: {e}")
