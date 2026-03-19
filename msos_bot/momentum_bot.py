@@ -508,4 +508,16 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Handle both Railway and local environments
+    try:
+        # Try the standard approach (works locally)
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            # Railway environment - event loop already exists
+            # Get the existing loop and run the coroutine
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+            loop.run_forever()
+        else:
+            raise

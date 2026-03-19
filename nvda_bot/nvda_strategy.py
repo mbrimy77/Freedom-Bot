@@ -193,48 +193,73 @@ class NVDAOpeningRangeBot:
         """Fetch 15-minute opening range (9:30-9:45 AM ET)"""
         print(f"\n[{self._get_timestamp_et()}] Establishing 15-minute Opening Range...")
         
-        try:
-            now_et = datetime.now(TIMEZONE_ET)
-            
-            # Set time range for ORB (9:30 AM - 9:45 AM ET today)
-            orb_start_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-            orb_end_time = now_et.replace(hour=9, minute=45, second=0, microsecond=0)
-            
-            # If current time is before ORB end, wait
-            if now_et < orb_end_time:
-                wait_seconds = (orb_end_time - now_et).total_seconds()
-                print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for ORB to complete...")
-                await asyncio.sleep(wait_seconds + 5)  # Add 5 seconds buffer
-            
-            # Fetch 5-minute bars for the opening range
-            request = StockBarsRequest(
-                symbol_or_symbols=MONITOR_TICKER,
-                timeframe=TimeFrame.Minute,
-                start=orb_start_time,
-                end=orb_end_time,
-                limit=15
-            )
-            
-            bars = self.data_client.get_stock_bars(request)
-            
-            if MONITOR_TICKER in bars and len(bars[MONITOR_TICKER]) > 0:
-                bar_list = bars[MONITOR_TICKER]
-                self.orb_high = max([float(bar.high) for bar in bar_list])
-                self.orb_low = min([float(bar.low) for bar in bar_list])
-                self.orb_established = True
+        max_retries = 5
+        retry_delay = 60  # 60 seconds between retries
+        
+        for attempt in range(max_retries):
+            try:
+                now_et = datetime.now(TIMEZONE_ET)
                 
-                print(f"[{self._get_timestamp_et()}] Opening Range Established (9:30-9:45 AM ET)")
-                print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
-                print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
-                print(f"[{self._get_timestamp_et()}] ORB Range: ${self.orb_high - self.orb_low:.2f}")
-                return True
-            else:
-                print(f"[{self._get_timestamp_et()}] ERROR: No bar data found for ORB period")
-                return False
-            
-        except Exception as e:
-            print(f"[{self._get_timestamp_et()}] ERROR establishing ORB: {e}")
-            return False
+                # Set time range for ORB (9:30 AM - 9:45 AM ET today)
+                orb_start_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+                orb_end_time = now_et.replace(hour=9, minute=45, second=0, microsecond=0)
+                
+                # If current time is before ORB end, wait
+                if now_et < orb_end_time:
+                    wait_seconds = (orb_end_time - now_et).total_seconds()
+                    print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for ORB to complete...")
+                    await asyncio.sleep(wait_seconds + 10)  # Add 10 seconds buffer
+                
+                # Update time after waiting
+                now_et = datetime.now(TIMEZONE_ET)
+                print(f"[{self._get_timestamp_et()}] Fetching ORB data (attempt {attempt + 1}/{max_retries})...")
+                
+                # Fetch 1-minute bars for the opening range period
+                # We'll get all 1-min bars from 9:30-9:45 to calculate high/low
+                request = StockBarsRequest(
+                    symbol_or_symbols=MONITOR_TICKER,
+                    timeframe=TimeFrame.Minute,
+                    start=orb_start_time,
+                    end=orb_end_time,
+                    limit=20  # Request up to 20 bars (15 min period)
+                )
+                
+                bars = self.data_client.get_stock_bars(request)
+                
+                if MONITOR_TICKER in bars and len(bars[MONITOR_TICKER]) > 0:
+                    bar_list = bars[MONITOR_TICKER]
+                    print(f"[{self._get_timestamp_et()}] Received {len(bar_list)} bars for ORB calculation")
+                    
+                    self.orb_high = max([float(bar.high) for bar in bar_list])
+                    self.orb_low = min([float(bar.low) for bar in bar_list])
+                    self.orb_established = True
+                    
+                    print(f"[{self._get_timestamp_et()}] Opening Range Established (9:30-9:45 AM ET)")
+                    print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
+                    print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
+                    print(f"[{self._get_timestamp_et()}] ORB Range: ${self.orb_high - self.orb_low:.2f}")
+                    return True
+                else:
+                    print(f"[{self._get_timestamp_et()}] WARNING: No bar data returned (attempt {attempt + 1}/{max_retries})")
+                    
+                    if attempt < max_retries - 1:
+                        print(f"[{self._get_timestamp_et()}] Retrying in {retry_delay} seconds...")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        print(f"[{self._get_timestamp_et()}] ERROR: Failed to get ORB data after {max_retries} attempts")
+                        return False
+                
+            except Exception as e:
+                print(f"[{self._get_timestamp_et()}] ERROR establishing ORB (attempt {attempt + 1}/{max_retries}): {e}")
+                
+                if attempt < max_retries - 1:
+                    print(f"[{self._get_timestamp_et()}] Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    print(f"[{self._get_timestamp_et()}] ERROR: Failed to establish ORB after {max_retries} attempts")
+                    return False
+        
+        return False
     
     def calculate_position_size(self, entry_price):
         """
@@ -652,4 +677,16 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Handle both Railway and local environments
+    try:
+        # Try the standard approach (works locally)
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "asyncio.run() cannot be called from a running event loop" in str(e):
+            # Railway environment - event loop already exists
+            # Get the existing loop and run the coroutine
+            loop = asyncio.get_event_loop()
+            loop.create_task(main())
+            loop.run_forever()
+        else:
+            raise
