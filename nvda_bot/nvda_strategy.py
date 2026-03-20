@@ -739,7 +739,21 @@ class NVDAOpeningRangeBot:
         
         # Run the stream - use _run_forever() directly since we already have an event loop
         # The stream.run() method calls asyncio.run() which fails when a loop is already running
-        await self.stream._run_forever()
+        try:
+            await self.stream._run_forever()
+        except ValueError as e:
+            if "connection limit exceeded" in str(e):
+                print(f"\n[{self._get_timestamp_et()}] ERROR: Connection limit exceeded")
+                print(f"[{self._get_timestamp_et()}] This means another bot instance is using the Alpaca connection")
+                print(f"[{self._get_timestamp_et()}] Possible causes:")
+                print(f"[{self._get_timestamp_et()}]   1. Railway running multiple replicas of this service")
+                print(f"[{self._get_timestamp_et()}]   2. MSOS bot still connected (should have exited)")
+                print(f"[{self._get_timestamp_et()}]   3. Old deployment still running")
+                print(f"[{self._get_timestamp_et()}] Exiting - Railway will restart in 30 seconds")
+                await asyncio.sleep(30)
+                return
+            else:
+                raise
 
 
 async def main():
