@@ -740,31 +740,22 @@ async def main():
 
 if __name__ == "__main__":
     # Handle both Railway and local environments
-    import sys
+    # IMPORTANT: Always create a NEW event loop to avoid deprecated loop issues
+    # The deprecated get_event_loop() doesn't support modern websocket features
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
-    # Check Python version for compatibility
-    if sys.version_info >= (3, 7):
-        # Try to get existing event loop first
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        print("\n[INFO] Bot stopped by user")
+    finally:
+        # Clean up
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        # Run the bot
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except:
+            pass
         try:
-            loop.run_until_complete(main())
-        except KeyboardInterrupt:
-            print("\n[INFO] Bot stopped by user")
-        finally:
-            # Clean up
-            try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            except:
-                pass
-    else:
-        # Fallback for older Python
-        asyncio.run(main())
+            loop.close()
+        except:
+            pass
