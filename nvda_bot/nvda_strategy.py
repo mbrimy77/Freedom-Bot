@@ -10,8 +10,11 @@ NVDA 15-Minute Opening Range Breakout (ORB) Strategy
 
 import asyncio
 import os
+import sys
+import random
 from datetime import datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 import pytz
 from dotenv import load_dotenv
 
@@ -49,6 +52,79 @@ GOLDEN_GAP_EXIT = time(14, 0)  # 2:00 PM CST (hard exit for MSOS buffer)
 
 TIMEZONE_ET = pytz.timezone('America/New_York')
 TIMEZONE_CST = pytz.timezone('America/Chicago')
+
+# Startup coordination
+RESTART_TRACKER_FILE = "/tmp/nvda_bot_restart_count.txt"
+
+
+def log_and_flush(message):
+    """Print and immediately flush to ensure logs appear in Railway"""
+    print(message, flush=True)
+
+
+async def handle_connection_limit_backoff():
+    """
+    Implement exponential backoff if we've been restarting repeatedly.
+    This prevents Railway restart storms when connection limit is exceeded.
+    """
+    tracker_path = Path(RESTART_TRACKER_FILE)
+    
+    try:
+        if tracker_path.exists():
+            content = tracker_path.read_text().strip()
+            if content:
+                last_attempt_time, attempt_count = content.split(',')
+                last_attempt = float(last_attempt_time)
+                attempts = int(attempt_count)
+                
+                # If last attempt was within 5 minutes, increment counter
+                if (datetime.now().timestamp() - last_attempt) < 300:
+                    attempts += 1
+                else:
+                    # More than 5 minutes passed, reset counter
+                    attempts = 1
+            else:
+                attempts = 1
+        else:
+            attempts = 1
+        
+        # Write current attempt
+        tracker_path.write_text(f"{datetime.now().timestamp()},{attempts}")
+        
+        # If we've had multiple recent failures, add exponential backoff
+        if attempts > 1:
+            # Exponential backoff: 5s, 10s, 20s, 40s, 60s (max)
+            backoff_seconds = min(60, 5 * (2 ** (attempts - 2)))
+            # Add jitter to prevent thundering herd
+            jitter = random.uniform(0, backoff_seconds * 0.3)
+            total_delay = backoff_seconds + jitter
+            
+            log_and_flush(f"[INFO] Recent restart detected (attempt #{attempts})")
+            log_and_flush(f"[INFO] Waiting {total_delay:.1f}s to prevent connection storms...")
+            await asyncio.sleep(total_delay)
+        
+        return attempts
+        
+    except Exception as e:
+        log_and_flush(f"[WARNING] Backoff tracker error: {e}")
+        return 1
+
+
+async def test_alpaca_connection(trading_client):
+    """
+    Test Alpaca API connection before subscribing to websockets.
+    Fails fast if connection is not available.
+    """
+    try:
+        log_and_flush("[INFO] Testing Alpaca API connection...")
+        # Simple API call to verify credentials and connection
+        account = trading_client.get_account()
+        log_and_flush(f"[INFO] Connection successful - Account: {account.account_number}")
+        return True
+    except Exception as e:
+        log_and_flush(f"[ERROR] Alpaca API connection test failed: {e}")
+        log_and_flush(f"[ERROR] Cannot proceed without API access")
+        return False
 
 
 class NVDAOpeningRangeBot:
@@ -380,8 +456,18 @@ class NVDAOpeningRangeBot:
                 return False
             
         except Exception as e:
-            print(f"[{self._get_timestamp_et()}] ERROR placing order: {e}")
-            print(f"[{self._get_timestamp_et()}] Position NOT entered due to error")
+            error_msg = str(e)
+            log_and_flush(f"[{self._get_timestamp_et()}] !!!!! ERROR placing order: {error_msg} !!!!!")
+            log_and_flush(f"[{self._get_timestamp_et()}] Error type: {type(e).__name__}")
+            log_and_flush(f"[{self._get_timestamp_et()}] Ticker: {ticker}, Shares: {shares}, Stop Price: {stop_price}")
+            
+            # Check if it's a connection limit issue during order placement
+            if "connection limit" in error_msg.lower() or "429" in error_msg:
+                log_and_flush(f"[{self._get_timestamp_et()}] CONNECTION LIMIT ERROR during order placement")
+                log_and_flush(f"[{self._get_timestamp_et()}] This means another bot is connected to Alpaca")
+                log_and_flush(f"[{self._get_timestamp_et()}] Check Railway dashboard for multiple replicas")
+            
+            log_and_flush(f"[{self._get_timestamp_et()}] Position NOT entered due to error")
             return False
     
     async def get_child_orders(self, parent_order_id):
@@ -675,11 +761,23 @@ class NVDAOpeningRangeBot:
     
     async def run(self):
         """Main bot loop"""
-        print(f"\n{'='*70}")
-        print(f"NVDA 15-MIN OPENING RANGE BREAKOUT BOT STARTED")
-        print(f"{'='*70}\n")
+        log_and_flush(f"\n{'='*70}")
+        log_and_flush(f"NVDA 15-MIN OPENING RANGE BREAKOUT BOT STARTED")
+        log_and_flush(f"{'='*70}\n")
         
-        # Check if we should run right now (prevent connecting to websockets when not needed)
+        # STEP 1: Implement exponential backoff if we've been restarting repeatedly
+        attempt_num = await handle_connection_limit_backoff()
+        if attempt_num > 5:
+            log_and_flush(f"[ERROR] Too many restart attempts ({attempt_num})")
+            log_and_flush(f"[ERROR] Possible causes:")
+            log_and_flush(f"[ERROR]   - Multiple Railway replicas running")
+            log_and_flush(f"[ERROR]   - Another bot holding the connection")
+            log_and_flush(f"[ERROR]   - Alpaca API issues")
+            log_and_flush(f"[INFO] Exiting - check Railway dashboard for multiple replicas")
+            await asyncio.sleep(60)
+            return
+        
+        # STEP 2: Check if we should run right now (prevent connecting to websockets when not needed)
         now_et = datetime.now(TIMEZONE_ET)
         now_cst = datetime.now(pytz.timezone('America/Chicago'))
         current_time_cst = now_cst.time()
@@ -687,16 +785,22 @@ class NVDAOpeningRangeBot:
         # CRITICAL: Don't connect to Alpaca if MSOS bot should be running (2:00 PM - 4:00 PM CST)
         # This prevents connection limit exceeded errors
         if time(14, 0) <= current_time_cst <= time(16, 0):
-            print(f"[{self._get_timestamp_et()}] Current time: {now_cst.strftime('%H:%M:%S %Z')}")
-            print(f"[{self._get_timestamp_et()}] NVDA bot window closed (2:00 PM CST - next day)")
-            print(f"[{self._get_timestamp_et()}] MSOS bot time slot - exiting to avoid connection conflict")
-            print(f"[{self._get_timestamp_et()}] Railway will restart this bot and check again in 30 seconds")
-            await asyncio.sleep(30)  # Sleep before exit so Railway doesn't restart too fast
+            log_and_flush(f"[{self._get_timestamp_et()}] Current time: {now_cst.strftime('%H:%M:%S %Z')}")
+            log_and_flush(f"[{self._get_timestamp_et()}] NVDA bot window closed (2:00 PM CST - next day)")
+            log_and_flush(f"[{self._get_timestamp_et()}] MSOS bot time slot - exiting to avoid connection conflict")
+            log_and_flush(f"[{self._get_timestamp_et()}] Railway will restart this bot and check again")
+            await asyncio.sleep(30)
             return
         
-        # Wait for market to open
+        # STEP 3: Wait for market to open
         if not await self.wait_for_market_open():
             return  # Exit if market not open
+        
+        # STEP 4: Test Alpaca API connection BEFORE subscribing to websockets
+        if not await test_alpaca_connection(self.trading_client):
+            log_and_flush(f"[ERROR] Cannot connect to Alpaca API - exiting")
+            await asyncio.sleep(30)
+            return
         
         # Check for existing positions (in case of bot restart)
         print(f"\n[{self._get_timestamp_et()}] Checking for existing positions...")

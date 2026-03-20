@@ -7,8 +7,11 @@ Bi-directional Momentum Trading Bot
 
 import asyncio
 import os
+import sys
+import random
 from datetime import datetime, time, timedelta
 from decimal import Decimal
+from pathlib import Path
 import pytz
 from dotenv import load_dotenv
 
@@ -37,6 +40,79 @@ TRIGGER_START = time(14, 15)  # 2:15 PM CT
 TRIGGER_END = time(14, 30)    # 2:30 PM CT
 EXIT_TIME = time(14, 58)      # 2:58 PM CT
 TIMEZONE = pytz.timezone('America/Chicago')
+
+# Startup coordination
+RESTART_TRACKER_FILE = "/tmp/msos_bot_restart_count.txt"
+
+
+def log_and_flush(message):
+    """Print and immediately flush to ensure logs appear in Railway"""
+    print(message, flush=True)
+
+
+async def handle_connection_limit_backoff():
+    """
+    Implement exponential backoff if we've been restarting repeatedly.
+    This prevents Railway restart storms when connection limit is exceeded.
+    """
+    tracker_path = Path(RESTART_TRACKER_FILE)
+    
+    try:
+        if tracker_path.exists():
+            content = tracker_path.read_text().strip()
+            if content:
+                last_attempt_time, attempt_count = content.split(',')
+                last_attempt = float(last_attempt_time)
+                attempts = int(attempt_count)
+                
+                # If last attempt was within 5 minutes, increment counter
+                if (datetime.now().timestamp() - last_attempt) < 300:
+                    attempts += 1
+                else:
+                    # More than 5 minutes passed, reset counter
+                    attempts = 1
+            else:
+                attempts = 1
+        else:
+            attempts = 1
+        
+        # Write current attempt
+        tracker_path.write_text(f"{datetime.now().timestamp()},{attempts}")
+        
+        # If we've had multiple recent failures, add exponential backoff
+        if attempts > 1:
+            # Exponential backoff: 5s, 10s, 20s, 40s, 60s (max)
+            backoff_seconds = min(60, 5 * (2 ** (attempts - 2)))
+            # Add jitter to prevent thundering herd
+            jitter = random.uniform(0, backoff_seconds * 0.3)
+            total_delay = backoff_seconds + jitter
+            
+            log_and_flush(f"[INFO] Recent restart detected (attempt #{attempts})")
+            log_and_flush(f"[INFO] Waiting {total_delay:.1f}s to prevent connection storms...")
+            await asyncio.sleep(total_delay)
+        
+        return attempts
+        
+    except Exception as e:
+        log_and_flush(f"[WARNING] Backoff tracker error: {e}")
+        return 1
+
+
+async def test_alpaca_connection(trading_client):
+    """
+    Test Alpaca API connection before subscribing to websockets.
+    Fails fast if connection is not available.
+    """
+    try:
+        log_and_flush("[INFO] Testing Alpaca API connection...")
+        # Simple API call to verify credentials and connection
+        account = trading_client.get_account()
+        log_and_flush(f"[INFO] Connection successful - Account: {account.account_number}")
+        return True
+    except Exception as e:
+        log_and_flush(f"[ERROR] Alpaca API connection test failed: {e}")
+        log_and_flush(f"[ERROR] Cannot proceed without API access")
+        return False
 
 
 class MomentumTradingBot:
@@ -215,8 +291,18 @@ class MomentumTradingBot:
                 print(f"[{self._get_timestamp()}] FAILED: Position NOT entered - order did not fill")
             
         except Exception as e:
-            print(f"[{self._get_timestamp()}] ERROR placing order: {e}")
-            print(f"[{self._get_timestamp()}] Position NOT entered due to error")
+            error_msg = str(e)
+            log_and_flush(f"[{self._get_timestamp()}] !!!!! ERROR placing order: {error_msg} !!!!!")
+            log_and_flush(f"[{self._get_timestamp()}] Error type: {type(e).__name__}")
+            log_and_flush(f"[{self._get_timestamp()}] Ticker: {ticker_to_trade}, Notional: ${notional}, Side: {side}")
+            
+            # Check if it's a connection limit issue during order placement
+            if "connection limit" in error_msg.lower() or "429" in error_msg:
+                log_and_flush(f"[{self._get_timestamp()}] CONNECTION LIMIT ERROR during order placement")
+                log_and_flush(f"[{self._get_timestamp()}] This means another bot is connected to Alpaca")
+                log_and_flush(f"[{self._get_timestamp()}] Check Railway dashboard for multiple replicas")
+            
+            log_and_flush(f"[{self._get_timestamp()}] Position NOT entered due to error")
     
     async def get_fill_price(self, order_id):
         """Get the fill price of the order and verify it filled"""
@@ -473,35 +559,53 @@ class MomentumTradingBot:
     
     async def run(self):
         """Main bot loop"""
-        print(f"\n{'='*60}")
-        print(f"MOMENTUM TRADING BOT STARTED")
-        print(f"{'='*60}\n")
+        log_and_flush(f"\n{'='*60}")
+        log_and_flush(f"MOMENTUM TRADING BOT STARTED")
+        log_and_flush(f"{'='*60}\n")
         
-        # Check if we should run right now (prevent connecting to websockets when not needed)
+        # STEP 1: Implement exponential backoff if we've been restarting repeatedly
+        attempt_num = await handle_connection_limit_backoff()
+        if attempt_num > 5:
+            log_and_flush(f"[ERROR] Too many restart attempts ({attempt_num})")
+            log_and_flush(f"[ERROR] Possible causes:")
+            log_and_flush(f"[ERROR]   - Multiple Railway replicas running")
+            log_and_flush(f"[ERROR]   - NVDA bot still holding the connection")
+            log_and_flush(f"[ERROR]   - Alpaca API issues")
+            log_and_flush(f"[INFO] Exiting - check Railway dashboard for multiple replicas")
+            await asyncio.sleep(60)
+            return
+        
+        # STEP 2: Check if we should run right now (prevent connecting to websockets when not needed)
         now_ct = datetime.now(TIMEZONE)
         current_time_ct = now_ct.time()
         
         # CRITICAL: Don't connect to Alpaca if NVDA bot should be running (before 2:00 PM CST)
         # This prevents connection limit exceeded errors
         if current_time_ct < time(14, 0):
-            print(f"[{self._get_timestamp()}] Current time: {now_ct.strftime('%H:%M:%S %Z')}")
-            print(f"[{self._get_timestamp()}] MSOS bot window not yet open (starts 2:01 PM CST)")
-            print(f"[{self._get_timestamp()}] NVDA bot time slot - exiting to avoid connection conflict")
-            print(f"[{self._get_timestamp()}] Railway will restart this bot and check again in 30 seconds")
-            await asyncio.sleep(30)  # Sleep before exit so Railway doesn't restart too fast
+            log_and_flush(f"[{self._get_timestamp()}] Current time: {now_ct.strftime('%H:%M:%S %Z')}")
+            log_and_flush(f"[{self._get_timestamp()}] MSOS bot window not yet open (starts 2:01 PM CST)")
+            log_and_flush(f"[{self._get_timestamp()}] NVDA bot time slot - exiting to avoid connection conflict")
+            log_and_flush(f"[{self._get_timestamp()}] Railway will restart this bot and check again")
+            await asyncio.sleep(30)
             return
         
         # Check if after exit time
         if current_time_ct >= EXIT_TIME:
-            print(f"[{self._get_timestamp()}] Current time: {now_ct.strftime('%H:%M:%S %Z')}")
-            print(f"[{self._get_timestamp()}] MSOS bot window closed for today (closes 2:58 PM CST)")
-            print(f"[{self._get_timestamp()}] Exiting - Railway will restart tomorrow")
+            log_and_flush(f"[{self._get_timestamp()}] Current time: {now_ct.strftime('%H:%M:%S %Z')}")
+            log_and_flush(f"[{self._get_timestamp()}] MSOS bot window closed for today (closes 2:58 PM CST)")
+            log_and_flush(f"[{self._get_timestamp()}] Exiting - Railway will restart tomorrow")
             await asyncio.sleep(30)
             return
         
-        # Wait for trading window (will only wait if between 2:00-2:01 PM)
+        # STEP 3: Wait for trading window (will only wait if between 2:00-2:01 PM)
         if not await self.wait_for_trading_window():
             return  # Exit if not in trading window
+        
+        # STEP 4: Test Alpaca API connection BEFORE subscribing to websockets
+        if not await test_alpaca_connection(self.trading_client):
+            log_and_flush(f"[ERROR] Cannot connect to Alpaca API - exiting")
+            await asyncio.sleep(30)
+            return
         
         # Fetch previous close
         if await self.fetch_previous_close() is None:
