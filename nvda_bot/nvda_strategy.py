@@ -3,7 +3,7 @@ NVDA 15-Minute Opening Range Breakout (ORB) Strategy
 - Monitors NVDA for 15-min ORB (9:30-9:45 AM ET)
 - Trades NVDL (2x Long) or NVD (2x Short) based on 5-min candle closes
 - Position sizing: 1.5% move = $300 loss on $20k account
-- Dual-stage exit: 1.5% hard stop → 3% profit triggers 1% trailing stop
+- Dual-stage exit: 1.5% hard stop -> 3% profit triggers 1% trailing stop
 - Hard exit at 2:00 PM CST (Golden Gap for MSOS bot at 2:15 PM)
 - Maximum one trade per day
 """
@@ -355,7 +355,7 @@ class NVDAOpeningRangeBot:
             
             if filled_order.status == 'filled':
                 actual_fill_price = float(filled_order.filled_avg_price)
-                print(f"[{self._get_timestamp_et()}] ✓ ORDER FILLED at ${actual_fill_price:.2f}")
+                print(f"[{self._get_timestamp_et()}] SUCCESS: ORDER FILLED at ${actual_fill_price:.2f}")
                 
                 # NOW set position state (only after confirming fill)
                 self.position_entered = True
@@ -374,7 +374,7 @@ class NVDAOpeningRangeBot:
                 
                 return True
             else:
-                print(f"[{self._get_timestamp_et()}] ✗ ORDER NOT FILLED - Status: {filled_order.status}")
+                print(f"[{self._get_timestamp_et()}] FAILED: ORDER NOT FILLED - Status: {filled_order.status}")
                 print(f"[{self._get_timestamp_et()}] Reason: {filled_order.status}")
                 
                 # Cancel the order if it's still pending
@@ -387,7 +387,7 @@ class NVDAOpeningRangeBot:
                 return False
             
         except Exception as e:
-            print(f"[{self._get_timestamp_et()}] ✗ ERROR placing order: {e}")
+            print(f"[{self._get_timestamp_et()}] ERROR placing order: {e}")
             print(f"[{self._get_timestamp_et()}] Position NOT entered due to error")
             return False
     
@@ -702,12 +702,12 @@ class NVDAOpeningRangeBot:
         print(f"\n[{self._get_timestamp_et()}] STRATEGY CONFIGURATION:")
         print(f"[{self._get_timestamp_et()}] Phase 1 (9:30-9:45 AM): Track 15-min ORB")
         print(f"[{self._get_timestamp_et()}] Phase 2 (After 9:45 AM): Monitor 5-min candles for breakouts")
-        print(f"[{self._get_timestamp_et()}] Long Entry: 5-min body entirely above ORB High → Buy {LONG_TICKER}")
-        print(f"[{self._get_timestamp_et()}] Short Entry: 5-min body entirely below ORB Low → Buy {SHORT_TICKER}")
+        print(f"[{self._get_timestamp_et()}] Long Entry: 5-min body entirely above ORB High -> Buy {LONG_TICKER}")
+        print(f"[{self._get_timestamp_et()}] Short Entry: 5-min body entirely below ORB Low -> Buy {SHORT_TICKER}")
         print(f"[{self._get_timestamp_et()}] Max Trades: {MAX_TRADES_PER_DAY}")
         print(f"[{self._get_timestamp_et()}] Exit Strategy:")
         print(f"[{self._get_timestamp_et()}]   Stage 1: {HARD_STOP_PCT}% Hard Stop Loss")
-        print(f"[{self._get_timestamp_et()}]   Stage 2: {PROFIT_TARGET_PCT}% Profit → {TRAILING_STOP_PCT}% Trailing Stop")
+        print(f"[{self._get_timestamp_et()}]   Stage 2: {PROFIT_TARGET_PCT}% Profit -> {TRAILING_STOP_PCT}% Trailing Stop")
         print(f"[{self._get_timestamp_et()}]   Stage 3: Golden Gap Exit at 2:00 PM CST\n")
         
         # Mark that we're tracking ORB

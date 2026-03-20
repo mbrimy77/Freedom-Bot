@@ -210,12 +210,12 @@ class MomentumTradingBot:
                 self.position_entered = True
                 self.position_side = 'long' if side == OrderSide.BUY else 'short'
                 self.active_ticker = ticker_to_trade
-                print(f"[{self._get_timestamp()}] ✓ Position entered successfully")
+                print(f"[{self._get_timestamp()}] SUCCESS: Position entered successfully")
             else:
-                print(f"[{self._get_timestamp()}] ✗ Position NOT entered - order did not fill")
+                print(f"[{self._get_timestamp()}] FAILED: Position NOT entered - order did not fill")
             
         except Exception as e:
-            print(f"[{self._get_timestamp()}] ✗ ERROR placing order: {e}")
+            print(f"[{self._get_timestamp()}] ERROR placing order: {e}")
             print(f"[{self._get_timestamp()}] Position NOT entered due to error")
     
     async def get_fill_price(self, order_id):
@@ -225,7 +225,7 @@ class MomentumTradingBot:
             
             if order.status == 'filled' and order.filled_avg_price:
                 self.entry_price = float(order.filled_avg_price)
-                print(f"[{self._get_timestamp()}] ✓ ORDER FILLED at: ${self.entry_price:.2f}")
+                print(f"[{self._get_timestamp()}] SUCCESS: ORDER FILLED at: ${self.entry_price:.2f}")
                 
                 # Initialize trailing stop tracking
                 self.highest_price_since_entry = self.entry_price
@@ -234,7 +234,7 @@ class MomentumTradingBot:
                 
                 return True
             else:
-                print(f"[{self._get_timestamp()}] ✗ ORDER NOT FILLED - Status: {order.status}")
+                print(f"[{self._get_timestamp()}] FAILED: ORDER NOT FILLED - Status: {order.status}")
                 
                 # Try to cancel if still pending
                 try:
@@ -247,7 +247,7 @@ class MomentumTradingBot:
                 return False
                 
         except Exception as e:
-            print(f"[{self._get_timestamp()}] ✗ ERROR getting fill price: {e}")
+            print(f"[{self._get_timestamp()}] ERROR getting fill price: {e}")
             return False
     
     def update_trailing_stop(self, current_price):
