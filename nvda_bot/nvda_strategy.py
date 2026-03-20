@@ -391,10 +391,11 @@ class NVDAOpeningRangeBot:
                 return False
             
             # Calculate stop loss price based on ETF price
+            # IMPORTANT: Must round to 2 decimals - Alpaca requires penny increments for stocks > $1
             if side == OrderSide.BUY:
-                stop_price = etf_price * (1 - HARD_STOP_PCT / 100)
+                stop_price = round(etf_price * (1 - HARD_STOP_PCT / 100), 2)
             else:
-                stop_price = etf_price * (1 + HARD_STOP_PCT / 100)
+                stop_price = round(etf_price * (1 + HARD_STOP_PCT / 100), 2)
             
             print(f"\n[{self._get_timestamp_et()}] PLACING {'LONG' if side == OrderSide.BUY else 'SHORT'} ORDER")
             print(f"[{self._get_timestamp_et()}] Ticker: {ticker}")

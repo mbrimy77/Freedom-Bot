@@ -342,14 +342,16 @@ class MomentumTradingBot:
             # For long positions, track highest price
             if current_price > self.highest_price_since_entry:
                 self.highest_price_since_entry = current_price
-                self.trailing_stop_price = self.highest_price_since_entry * (1 - TRAILING_STOP_PCT / 100)
+                # IMPORTANT: Round to 2 decimals - Alpaca requires penny increments for stocks > $1
+                self.trailing_stop_price = round(self.highest_price_since_entry * (1 - TRAILING_STOP_PCT / 100), 2)
                 print(f"[{self._get_timestamp()}] {TRADE_TICKER} Trailing stop updated: ${self.trailing_stop_price:.2f} (High: ${self.highest_price_since_entry:.2f})")
         
         elif self.position_side == 'short':
             # For short positions, track lowest price
             if current_price < self.lowest_price_since_entry:
                 self.lowest_price_since_entry = current_price
-                self.trailing_stop_price = self.lowest_price_since_entry * (1 + TRAILING_STOP_PCT / 100)
+                # IMPORTANT: Round to 2 decimals - Alpaca requires penny increments for stocks > $1
+                self.trailing_stop_price = round(self.lowest_price_since_entry * (1 + TRAILING_STOP_PCT / 100), 2)
                 print(f"[{self._get_timestamp()}] {TRADE_TICKER} Trailing stop updated: ${self.trailing_stop_price:.2f} (Low: ${self.lowest_price_since_entry:.2f})")
     
     def check_trailing_stop_hit(self, current_price):
