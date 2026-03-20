@@ -435,6 +435,14 @@ class NVDAOpeningRangeBot:
                 self.shares = shares
                 self.trades_today += 1
                 
+                # Log exit strategy clearly
+                log_and_flush(f"\n[{self._get_timestamp_et()}] ===== EXIT STRATEGY ACTIVE =====")
+                log_and_flush(f"[{self._get_timestamp_et()}] 1. HARD STOP @ ${stop_price:.2f} (-{HARD_STOP_PCT}%) - Set on Alpaca, executes automatically")
+                log_and_flush(f"[{self._get_timestamp_et()}] 2. PROFIT TARGET @ ${actual_fill_price * (1 + PROFIT_TARGET_PCT / 100):.2f} (+{PROFIT_TARGET_PCT}%) - Upgrades to {TRAILING_STOP_PCT}% trailing stop")
+                log_and_flush(f"[{self._get_timestamp_et()}] 3. GOLDEN GAP EXIT @ 2:00 PM CST - Forced exit regardless of P&L")
+                log_and_flush(f"[{self._get_timestamp_et()}] Monitoring position for stop hits and profit target...")
+                log_and_flush(f"[{self._get_timestamp_et()}] =================================\n")
+                
                 # Initialize price tracking for trailing stop
                 self.highest_price_since_entry = actual_fill_price
                 self.lowest_price_since_entry = actual_fill_price
@@ -696,6 +704,27 @@ class NVDAOpeningRangeBot:
             if not self.position_entered or self.entry_ticker != LONG_TICKER:
                 return
             
+            # Check if position still exists (stop loss may have been hit by Alpaca)
+            try:
+                position = self.trading_client.get_open_position(LONG_TICKER)
+                if position is None:
+                    expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
+                    log_and_flush(f"\n[{self._get_timestamp_et()}] !!!!! STOP LOSS HIT BY ALPACA !!!!!")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Position closed automatically at stop price")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Entry: ${self.entry_price:.2f} → Stop: ~${expected_stop:.2f}")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Estimated Loss: ~${(expected_stop - self.entry_price) * self.shares:.2f} (-{HARD_STOP_PCT}%)")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Check Alpaca dashboard for exact exit price")
+                    self.position_entered = False
+                    self.position_side = None
+                    return
+            except Exception:
+                log_and_flush(f"\n[{self._get_timestamp_et()}] !!!!! POSITION CLOSED !!!!!")
+                log_and_flush(f"[{self._get_timestamp_et()}] Position no longer exists - likely stop loss triggered")
+                log_and_flush(f"[{self._get_timestamp_et()}] Check Alpaca dashboard for final exit details")
+                self.position_entered = False
+                self.position_side = None
+                return
+            
             # Check for Golden Gap exit
             if current_time_cst >= GOLDEN_GAP_EXIT:
                 await self.close_all_positions(f"GOLDEN GAP EXIT at {self._get_timestamp_cst()}")
@@ -733,6 +762,27 @@ class NVDAOpeningRangeBot:
             if not self.position_entered or self.entry_ticker != SHORT_TICKER:
                 return
             
+            # Check if position still exists (stop loss may have been hit by Alpaca)
+            try:
+                position = self.trading_client.get_open_position(SHORT_TICKER)
+                if position is None:
+                    expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
+                    log_and_flush(f"\n[{self._get_timestamp_et()}] !!!!! STOP LOSS HIT BY ALPACA !!!!!")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Position closed automatically at stop price")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Entry: ${self.entry_price:.2f} → Stop: ~${expected_stop:.2f}")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Estimated Loss: ~${(expected_stop - self.entry_price) * self.shares:.2f} (-{HARD_STOP_PCT}%)")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Check Alpaca dashboard for exact exit price")
+                    self.position_entered = False
+                    self.position_side = None
+                    return
+            except Exception:
+                log_and_flush(f"\n[{self._get_timestamp_et()}] !!!!! POSITION CLOSED !!!!!")
+                log_and_flush(f"[{self._get_timestamp_et()}] Position no longer exists - likely stop loss triggered")
+                log_and_flush(f"[{self._get_timestamp_et()}] Check Alpaca dashboard for final exit details")
+                self.position_entered = False
+                self.position_side = None
+                return
+            
             # Check for Golden Gap exit
             if current_time_cst >= GOLDEN_GAP_EXIT:
                 await self.close_all_positions(f"GOLDEN GAP EXIT at {self._get_timestamp_cst()}")
@@ -740,7 +790,7 @@ class NVDAOpeningRangeBot:
                 await self.stream.stop_ws()
                 return
             
-            # Update lowest price tracking (for short positions, we track the lowest)
+            # Update lowest price tracking (for long NVD positions, we still track lowest as reference)
             if self.nvd_current_price < self.lowest_price_since_entry:
                 self.lowest_price_since_entry = self.nvd_current_price
                 if not self.profit_target_hit:
@@ -751,8 +801,9 @@ class NVDAOpeningRangeBot:
             
             # Periodic logging every 30 seconds
             if self.should_log_periodic_update():
-                # For short ETF, profit = entry - current (inverse)
-                price_change = self.entry_price - self.nvd_current_price
+                # NVD is a LONG position (we BUY the inverse ETF)
+                # P&L calculation is the same as any long: (current - entry) * shares
+                price_change = self.nvd_current_price - self.entry_price
                 pl = price_change * self.shares
                 pl_pct = (price_change / self.entry_price) * 100
                 print(f"[{self._get_timestamp_et()}] >>> {SHORT_TICKER} Low: ${self.lowest_price_since_entry:.2f} | Current: ${self.nvd_current_price:.2f} | P&L: ${pl:.2f} ({pl_pct:+.2f}%)")
