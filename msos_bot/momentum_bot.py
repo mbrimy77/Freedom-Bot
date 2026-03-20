@@ -542,19 +542,16 @@ async def main():
 
 if __name__ == "__main__":
     # Handle both Railway and local environments
+    # First, check if there's already a running loop
     try:
-        # Try the standard approach (works locally)
+        running_loop = asyncio.get_running_loop()
+        print(f"[WARNING] Event loop already running, cannot use asyncio.run()")
+        # If we're here, there's a running loop which shouldn't happen in __main__
+        # This is a framework/environment issue - we need nest_asyncio
+        import nest_asyncio
+        nest_asyncio.apply()
         asyncio.run(main())
-    except RuntimeError as e:
-        if "asyncio.run() cannot be called from a running event loop" in str(e):
-            # Railway environment - event loop already exists
-            # Get or create event loop and run until complete
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            
-            loop.run_until_complete(main())
-        else:
-            raise
+    except RuntimeError:
+        # No running loop - this is the normal case
+        # Now try to run normally
+        asyncio.run(main())
