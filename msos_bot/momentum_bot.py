@@ -43,6 +43,7 @@ TIMEZONE = pytz.timezone('America/Chicago')
 
 # Startup coordination
 RESTART_TRACKER_FILE = "/tmp/msos_bot_restart_count.txt"
+CONNECTION_LOCK_FILE = "/tmp/msos_bot_connection.lock"
 
 
 def log_and_flush(message):
@@ -96,6 +97,56 @@ async def handle_connection_limit_backoff():
     except Exception as e:
         log_and_flush(f"[WARNING] Backoff tracker error: {e}")
         return 1
+
+
+async def acquire_connection_lock():
+    """
+    Attempt to acquire a connection lock to prevent multiple instances from connecting.
+    Returns True if lock acquired, False otherwise.
+    """
+    lock_path = Path(CONNECTION_LOCK_FILE)
+    
+    try:
+        # Check if lock exists
+        if lock_path.exists():
+            content = lock_path.read_text().strip()
+            if content:
+                lock_time = float(content)
+                age = datetime.now().timestamp() - lock_time
+                
+                # If lock is older than 10 minutes, assume it's stale and take it
+                if age > 600:
+                    log_and_flush(f"[INFO] Found stale lock ({age:.0f}s old) - cleaning up")
+                    lock_path.write_text(str(datetime.now().timestamp()))
+                    return True
+                else:
+                    log_and_flush(f"[ERROR] Another instance holds the connection lock ({age:.0f}s ago)")
+                    log_and_flush(f"[ERROR] This means another bot is already connected to Alpaca")
+                    log_and_flush(f"[ERROR] Railway may be running multiple replicas")
+                    log_and_flush(f"[ERROR] Check Railway dashboard and set replicas to 1")
+                    return False
+        
+        # No lock exists - create one
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(str(datetime.now().timestamp()))
+        log_and_flush("[INFO] Connection lock acquired")
+        return True
+        
+    except Exception as e:
+        log_and_flush(f"[WARNING] Connection lock error: {e}")
+        # If we can't manage locks, allow the connection (fail open)
+        return True
+
+
+def release_connection_lock():
+    """Release the connection lock"""
+    try:
+        lock_path = Path(CONNECTION_LOCK_FILE)
+        if lock_path.exists():
+            lock_path.unlink()
+            log_and_flush("[INFO] Connection lock released")
+    except Exception as e:
+        log_and_flush(f"[WARNING] Error releasing lock: {e}")
 
 
 async def test_alpaca_connection(trading_client):
@@ -603,9 +654,17 @@ class MomentumTradingBot:
         if not await self.wait_for_trading_window():
             return  # Exit if not in trading window
         
-        # STEP 4: Test Alpaca API connection BEFORE subscribing to websockets
+        # STEP 4: Acquire connection lock to prevent multiple instances
+        if not await acquire_connection_lock():
+            log_and_flush(f"[ERROR] Cannot acquire connection lock - another instance is running")
+            log_and_flush(f"[ERROR] Exiting to prevent connection limit errors")
+            await asyncio.sleep(30)
+            return
+        
+        # STEP 5: Test Alpaca API connection BEFORE subscribing to websockets
         if not await test_alpaca_connection(self.trading_client):
             log_and_flush(f"[ERROR] Cannot connect to Alpaca API - exiting")
+            release_connection_lock()
             await asyncio.sleep(30)
             return
         
@@ -651,17 +710,31 @@ class MomentumTradingBot:
             await self.stream._run_forever()
         except ValueError as e:
             if "connection limit exceeded" in str(e):
-                log_and_flush(f"\n[{self._get_timestamp()}] ERROR: Connection limit exceeded")
-                log_and_flush(f"[{self._get_timestamp()}] This means another bot instance is using the Alpaca connection")
+                log_and_flush(f"\n[{self._get_timestamp()}] !!!!! ERROR: CONNECTION LIMIT EXCEEDED !!!!!")
+                log_and_flush(f"[{self._get_timestamp()}] This means another instance is already connected to Alpaca")
+                log_and_flush(f"[{self._get_timestamp()}] ")
                 log_and_flush(f"[{self._get_timestamp()}] Possible causes:")
-                log_and_flush(f"[{self._get_timestamp()}]   1. Railway running multiple replicas of this service")
-                log_and_flush(f"[{self._get_timestamp()}]   2. NVDA bot still connected (should have exited)")
-                log_and_flush(f"[{self._get_timestamp()}]   3. Old deployment still running or websocket not properly closed")
+                log_and_flush(f"[{self._get_timestamp()}]   1. Railway running multiple replicas (SET REPLICAS TO 1)")
+                log_and_flush(f"[{self._get_timestamp()}]   2. NVDA bot still connected (check time window)")
+                log_and_flush(f"[{self._get_timestamp()}]   3. Previous instance didn't close properly")
+                log_and_flush(f"[{self._get_timestamp()}] ")
+                log_and_flush(f"[{self._get_timestamp()}] SOLUTION:")
+                log_and_flush(f"[{self._get_timestamp()}]   1. Go to Railway dashboard")
+                log_and_flush(f"[{self._get_timestamp()}]   2. Check Settings > Replicas = 1 (NOT more)")
+                log_and_flush(f"[{self._get_timestamp()}]   3. Restart the service to kill all instances")
+                log_and_flush(f"[{self._get_timestamp()}] ")
                 log_and_flush(f"[{self._get_timestamp()}] Exiting - Railway will restart in 30 seconds")
+                release_connection_lock()
                 await asyncio.sleep(30)
                 return
             else:
                 raise
+        except Exception as e:
+            log_and_flush(f"\n[{self._get_timestamp()}] !!!!! UNEXPECTED ERROR !!!!!")
+            log_and_flush(f"[{self._get_timestamp()}] Error: {e}")
+            log_and_flush(f"[{self._get_timestamp()}] Type: {type(e).__name__}")
+            release_connection_lock()
+            raise
         finally:
             # CRITICAL: Always close the websocket stream when exiting
             # This prevents orphaned connections that block future deployments
@@ -671,6 +744,9 @@ class MomentumTradingBot:
                 log_and_flush(f"[{self._get_timestamp()}] Websocket closed successfully")
             except Exception as e:
                 log_and_flush(f"[{self._get_timestamp()}] Error closing websocket: {e}")
+            
+            # Release the connection lock so future instances can connect
+            release_connection_lock()
 
 
 async def main():

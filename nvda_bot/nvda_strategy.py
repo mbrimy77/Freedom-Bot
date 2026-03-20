@@ -55,6 +55,7 @@ TIMEZONE_CST = pytz.timezone('America/Chicago')
 
 # Startup coordination
 RESTART_TRACKER_FILE = "/tmp/nvda_bot_restart_count.txt"
+CONNECTION_LOCK_FILE = "/tmp/nvda_bot_connection.lock"
 
 
 def log_and_flush(message):
@@ -108,6 +109,56 @@ async def handle_connection_limit_backoff():
     except Exception as e:
         log_and_flush(f"[WARNING] Backoff tracker error: {e}")
         return 1
+
+
+async def acquire_connection_lock():
+    """
+    Attempt to acquire a connection lock to prevent multiple instances from connecting.
+    Returns True if lock acquired, False otherwise.
+    """
+    lock_path = Path(CONNECTION_LOCK_FILE)
+    
+    try:
+        # Check if lock exists
+        if lock_path.exists():
+            content = lock_path.read_text().strip()
+            if content:
+                lock_time = float(content)
+                age = datetime.now().timestamp() - lock_time
+                
+                # If lock is older than 10 minutes, assume it's stale and take it
+                if age > 600:
+                    log_and_flush(f"[INFO] Found stale lock ({age:.0f}s old) - cleaning up")
+                    lock_path.write_text(str(datetime.now().timestamp()))
+                    return True
+                else:
+                    log_and_flush(f"[ERROR] Another instance holds the connection lock ({age:.0f}s ago)")
+                    log_and_flush(f"[ERROR] This means another bot is already connected to Alpaca")
+                    log_and_flush(f"[ERROR] Railway may be running multiple replicas")
+                    log_and_flush(f"[ERROR] Check Railway dashboard and set replicas to 1")
+                    return False
+        
+        # No lock exists - create one
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(str(datetime.now().timestamp()))
+        log_and_flush("[INFO] Connection lock acquired")
+        return True
+        
+    except Exception as e:
+        log_and_flush(f"[WARNING] Connection lock error: {e}")
+        # If we can't manage locks, allow the connection (fail open)
+        return True
+
+
+def release_connection_lock():
+    """Release the connection lock"""
+    try:
+        lock_path = Path(CONNECTION_LOCK_FILE)
+        if lock_path.exists():
+            lock_path.unlink()
+            log_and_flush("[INFO] Connection lock released")
+    except Exception as e:
+        log_and_flush(f"[WARNING] Error releasing lock: {e}")
 
 
 async def test_alpaca_connection(trading_client):
@@ -846,9 +897,17 @@ class NVDAOpeningRangeBot:
         if not await self.wait_for_market_open():
             return  # Exit if market not open
         
-        # STEP 4: Test Alpaca API connection BEFORE subscribing to websockets
+        # STEP 4: Acquire connection lock to prevent multiple instances
+        if not await acquire_connection_lock():
+            log_and_flush(f"[ERROR] Cannot acquire connection lock - another instance is running")
+            log_and_flush(f"[ERROR] Exiting to prevent connection limit errors")
+            await asyncio.sleep(30)
+            return
+        
+        # STEP 5: Test Alpaca API connection BEFORE subscribing to websockets
         if not await test_alpaca_connection(self.trading_client):
             log_and_flush(f"[ERROR] Cannot connect to Alpaca API - exiting")
+            release_connection_lock()
             await asyncio.sleep(30)
             return
         
@@ -876,38 +935,57 @@ class NVDAOpeningRangeBot:
         # Mark that we're tracking ORB
         self.orb_tracking = True
         
+        # Subscribe to data streams - CRITICAL: Do this BEFORE connecting
+        # All subscriptions are batched into a SINGLE websocket connection
+        log_and_flush(f"[{self._get_timestamp_et()}] Setting up subscriptions...")
+        
         # Subscribe to 1-minute bars for NVDA
         # - During 9:30-9:45: Tracks high/low to build ORB
         # - After 9:45: Aggregates into 5-min candles for breakout signals
-        print(f"[{self._get_timestamp_et()}] Subscribing to {MONITOR_TICKER} live bars...")
         self.stream.subscribe_bars(self.handle_nvda_bar, MONITOR_TICKER)
         
         # Subscribe to NVDL and NVD trade streams (for real-time position monitoring)
         self.stream.subscribe_trades(self.handle_nvdl_trade, LONG_TICKER)
         self.stream.subscribe_trades(self.handle_nvd_trade, SHORT_TICKER)
         
-        print(f"[{self._get_timestamp_et()}] Subscribed to {MONITOR_TICKER} bars (ORB + entry signals)")
-        print(f"[{self._get_timestamp_et()}] Subscribed to {LONG_TICKER} trades (position monitoring)")
-        print(f"[{self._get_timestamp_et()}] Subscribed to {SHORT_TICKER} trades (position monitoring)")
-        print(f"[{self._get_timestamp_et()}] Tracking 9:30-9:45 AM opening range...\n")
+        log_and_flush(f"[{self._get_timestamp_et()}] Subscribed to {MONITOR_TICKER} bars (ORB + entry signals)")
+        log_and_flush(f"[{self._get_timestamp_et()}] Subscribed to {LONG_TICKER} trades (position monitoring)")
+        log_and_flush(f"[{self._get_timestamp_et()}] Subscribed to {SHORT_TICKER} trades (position monitoring)")
+        log_and_flush(f"[{self._get_timestamp_et()}] Tracking 9:30-9:45 AM opening range...\n")
         
         # Run the stream - use _run_forever() directly since we already have an event loop
         # The stream.run() method calls asyncio.run() which fails when a loop is already running
+        log_and_flush(f"[{self._get_timestamp_et()}] Connecting to Alpaca websocket stream...")
+        
         try:
             await self.stream._run_forever()
         except ValueError as e:
             if "connection limit exceeded" in str(e):
-                log_and_flush(f"\n[{self._get_timestamp_et()}] ERROR: Connection limit exceeded")
-                log_and_flush(f"[{self._get_timestamp_et()}] This means another bot instance is using the Alpaca connection")
+                log_and_flush(f"\n[{self._get_timestamp_et()}] !!!!! ERROR: CONNECTION LIMIT EXCEEDED !!!!!")
+                log_and_flush(f"[{self._get_timestamp_et()}] This means another instance is already connected to Alpaca")
+                log_and_flush(f"[{self._get_timestamp_et()}] ")
                 log_and_flush(f"[{self._get_timestamp_et()}] Possible causes:")
-                log_and_flush(f"[{self._get_timestamp_et()}]   1. Railway running multiple replicas of this service")
-                log_and_flush(f"[{self._get_timestamp_et()}]   2. MSOS bot still connected (should have exited)")
-                log_and_flush(f"[{self._get_timestamp_et()}]   3. Old deployment still running or websocket not properly closed")
+                log_and_flush(f"[{self._get_timestamp_et()}]   1. Railway running multiple replicas (SET REPLICAS TO 1)")
+                log_and_flush(f"[{self._get_timestamp_et()}]   2. MSOS bot still connected (check time window)")
+                log_and_flush(f"[{self._get_timestamp_et()}]   3. Previous instance didn't close properly")
+                log_and_flush(f"[{self._get_timestamp_et()}] ")
+                log_and_flush(f"[{self._get_timestamp_et()}] SOLUTION:")
+                log_and_flush(f"[{self._get_timestamp_et()}]   1. Go to Railway dashboard")
+                log_and_flush(f"[{self._get_timestamp_et()}]   2. Check Settings > Replicas = 1 (NOT more)")
+                log_and_flush(f"[{self._get_timestamp_et()}]   3. Restart the service to kill all instances")
+                log_and_flush(f"[{self._get_timestamp_et()}] ")
                 log_and_flush(f"[{self._get_timestamp_et()}] Exiting - Railway will restart in 30 seconds")
+                release_connection_lock()
                 await asyncio.sleep(30)
                 return
             else:
                 raise
+        except Exception as e:
+            log_and_flush(f"\n[{self._get_timestamp_et()}] !!!!! UNEXPECTED ERROR !!!!!")
+            log_and_flush(f"[{self._get_timestamp_et()}] Error: {e}")
+            log_and_flush(f"[{self._get_timestamp_et()}] Type: {type(e).__name__}")
+            release_connection_lock()
+            raise
         finally:
             # CRITICAL: Always close the websocket stream when exiting
             # This prevents orphaned connections that block future deployments
@@ -917,6 +995,9 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"[{self._get_timestamp_et()}] Websocket closed successfully")
             except Exception as e:
                 log_and_flush(f"[{self._get_timestamp_et()}] Error closing websocket: {e}")
+            
+            # Release the connection lock so future instances can connect
+            release_connection_lock()
 
 
 async def main():
