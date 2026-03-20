@@ -311,29 +311,27 @@ class NVDAOpeningRangeBot:
     def calculate_position_size(self, entry_price):
         """
         Calculate shares based on:
-        - $20,000 account
-        - 1.5% move = $300 loss
+        - Use FULL $20,000 account size
         - ETF is 2x leveraged
         
-        Formula: shares = risk_amount / (entry_price * stop_pct * leverage)
+        Formula: shares = ACCOUNT_SIZE / entry_price
         """
         leverage = 2.0
-        stop_distance = entry_price * (HARD_STOP_PCT / 100)
         
-        # For 2x ETF, a 1.5% move in the underlying = ~3% move in the ETF
-        # So we need: shares * entry_price * 0.015 * 2 = 300
-        # shares = 300 / (entry_price * 0.015 * 2)
-        shares = RISK_AMOUNT / (entry_price * (HARD_STOP_PCT / 100) * leverage)
-        shares = int(shares)  # Round down to whole shares
+        # Use full account to calculate shares
+        shares = int(ACCOUNT_SIZE / entry_price)
         
         notional_value = shares * entry_price
+        # With 1.5% stop on 2x leveraged ETF, actual dollar risk will be:
+        # shares × entry_price × 1.5% × 2 = total risk
         max_loss = shares * entry_price * (HARD_STOP_PCT / 100) * leverage
+        max_loss_pct = (max_loss / ACCOUNT_SIZE) * 100
         
         print(f"[{self._get_timestamp_et()}] Position Sizing:")
         print(f"[{self._get_timestamp_et()}]   Entry Price: ${entry_price:.2f}")
         print(f"[{self._get_timestamp_et()}]   Shares: {shares}")
         print(f"[{self._get_timestamp_et()}]   Notional Value: ${notional_value:.2f}")
-        print(f"[{self._get_timestamp_et()}]   Expected Max Loss: ${max_loss:.2f}")
+        print(f"[{self._get_timestamp_et()}]   Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of account)")
         
         return shares
     
