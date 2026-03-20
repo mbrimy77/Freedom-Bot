@@ -870,6 +870,21 @@ class NVDAOpeningRangeBot:
 
 
 async def main():
+    # CRITICAL: Check time BEFORE creating bot to avoid websocket connection race condition
+    # When Railway deploys both bots simultaneously, they both try to connect at once
+    # This check prevents NVDA from even attempting connection during MSOS time window
+    now_cst = datetime.now(pytz.timezone('America/Chicago'))
+    current_time_cst = now_cst.time()
+    
+    # NVDA bot should NOT run between 2:00 PM - 4:00 PM CST (MSOS time)
+    if time(14, 0) <= current_time_cst <= time(16, 0):
+        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] NVDA bot window closed (2:00 PM CST - next day)")
+        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] MSOS bot time slot - exiting WITHOUT connecting to Alpaca")
+        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Railway will restart this bot and check again")
+        await asyncio.sleep(30)
+        return
+    
+    # Time check passed - safe to create bot and connect
     bot = NVDAOpeningRangeBot()
     await bot.run()
 

@@ -672,6 +672,27 @@ class MomentumTradingBot:
 
 
 async def main():
+    # CRITICAL: Check time BEFORE creating bot to avoid websocket connection race condition
+    # When Railway deploys both bots simultaneously, they both try to connect at once
+    # This check prevents MSOS from even attempting connection outside its time window
+    now_ct = datetime.now(TIMEZONE)
+    current_time_ct = now_ct.time()
+    
+    # MSOS bot should only run between 2:01 PM and 2:58 PM CST
+    if current_time_ct < time(14, 0):
+        log_and_flush(f"[{now_ct.strftime('%Y-%m-%d %H:%M:%S %Z')}] MSOS bot window not yet open (starts 2:01 PM CST)")
+        log_and_flush(f"[{now_ct.strftime('%Y-%m-%d %H:%M:%S %Z')}] NVDA bot time slot - exiting WITHOUT connecting to Alpaca")
+        log_and_flush(f"[{now_ct.strftime('%Y-%m-%d %H:%M:%S %Z')}] Railway will restart this bot and check again")
+        await asyncio.sleep(30)
+        return
+    
+    if current_time_ct >= EXIT_TIME:
+        log_and_flush(f"[{now_ct.strftime('%Y-%m-%d %H:%M:%S %Z')}] MSOS bot window closed for today (closes 2:58 PM CST)")
+        log_and_flush(f"[{now_ct.strftime('%Y-%m-%d %H:%M:%S %Z')}] Exiting - Railway will restart tomorrow")
+        await asyncio.sleep(30)
+        return
+    
+    # Time check passed - safe to create bot and connect
     bot = MomentumTradingBot()
     await bot.run()
 
