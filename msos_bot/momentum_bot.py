@@ -649,17 +649,26 @@ class MomentumTradingBot:
             await self.stream._run_forever()
         except ValueError as e:
             if "connection limit exceeded" in str(e):
-                print(f"\n[{self._get_timestamp()}] ERROR: Connection limit exceeded")
-                print(f"[{self._get_timestamp()}] This means another bot instance is using the Alpaca connection")
-                print(f"[{self._get_timestamp()}] Possible causes:")
-                print(f"[{self._get_timestamp()}]   1. Railway running multiple replicas of this service")
-                print(f"[{self._get_timestamp()}]   2. NVDA bot still connected (should have exited)")
-                print(f"[{self._get_timestamp()}]   3. Old deployment still running")
-                print(f"[{self._get_timestamp()}] Exiting - Railway will restart in 30 seconds")
+                log_and_flush(f"\n[{self._get_timestamp()}] ERROR: Connection limit exceeded")
+                log_and_flush(f"[{self._get_timestamp()}] This means another bot instance is using the Alpaca connection")
+                log_and_flush(f"[{self._get_timestamp()}] Possible causes:")
+                log_and_flush(f"[{self._get_timestamp()}]   1. Railway running multiple replicas of this service")
+                log_and_flush(f"[{self._get_timestamp()}]   2. NVDA bot still connected (should have exited)")
+                log_and_flush(f"[{self._get_timestamp()}]   3. Old deployment still running or websocket not properly closed")
+                log_and_flush(f"[{self._get_timestamp()}] Exiting - Railway will restart in 30 seconds")
                 await asyncio.sleep(30)
                 return
             else:
                 raise
+        finally:
+            # CRITICAL: Always close the websocket stream when exiting
+            # This prevents orphaned connections that block future deployments
+            try:
+                log_and_flush(f"[{self._get_timestamp()}] Closing websocket connection...")
+                await self.stream.close()
+                log_and_flush(f"[{self._get_timestamp()}] Websocket closed successfully")
+            except Exception as e:
+                log_and_flush(f"[{self._get_timestamp()}] Error closing websocket: {e}")
 
 
 async def main():
