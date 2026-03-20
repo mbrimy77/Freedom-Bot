@@ -728,8 +728,9 @@ class NVDAOpeningRangeBot:
         print(f"[{self._get_timestamp_et()}] Subscribed to {SHORT_TICKER} trades (position monitoring)")
         print(f"[{self._get_timestamp_et()}] Tracking 9:30-9:45 AM opening range...\n")
         
-        # Run the stream
-        await self.stream.run()
+        # Run the stream - use _run_forever() directly since we already have an event loop
+        # The stream.run() method calls asyncio.run() which fails when a loop is already running
+        await self.stream._run_forever()
 
 
 async def main():

@@ -531,8 +531,9 @@ class MomentumTradingBot:
         print(f"[{self._get_timestamp()}] Subscribed to {TRADE_TICKER} live trade stream (long position)")
         print(f"[{self._get_timestamp()}] Monitoring for signals...\n")
         
-        # Run the stream
-        await self.stream.run()
+        # Run the stream - use _run_forever() directly since we already have an event loop
+        # The stream.run() method calls asyncio.run() which fails when a loop is already running
+        await self.stream._run_forever()
 
 
 async def main():
