@@ -335,12 +335,13 @@ class NVDAOpeningRangeBot:
             print(f"[{self._get_timestamp_et()}] Stop Loss: ${stop_price:.2f} ({HARD_STOP_PCT}%)")
             
             # Submit market order with stop loss
+            # Using OTO (One-Triggers-Other) instead of BRACKET since we only have stop loss, no take profit
             order_data = MarketOrderRequest(
                 symbol=ticker,
                 qty=shares,
                 side=side,
                 time_in_force=TimeInForce.DAY,
-                order_class=OrderClass.BRACKET,
+                order_class=OrderClass.OTO,
                 stop_loss=StopLossRequest(stop_price=stop_price)
             )
             
