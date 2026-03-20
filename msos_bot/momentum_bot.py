@@ -440,51 +440,36 @@ class MomentumTradingBot:
         return False
     
     async def wait_for_trading_window(self):
-        """Wait until MSOS bot startup (2:01 PM CT) to prepare for trading"""
-        while True:
-            now_ct = datetime.now(TIMEZONE)
-            
-            # Check if weekend
-            if now_ct.weekday() >= 5:
-                # Wait until Monday 2:01 PM CT
-                days_until_monday = (7 - now_ct.weekday()) % 7
-                if days_until_monday == 0:
-                    days_until_monday = 1
-                
-                next_startup = now_ct.replace(hour=14, minute=1, second=0, microsecond=0) + timedelta(days=days_until_monday)
-                wait_seconds = (next_startup - now_ct).total_seconds()
-                
-                print(f"[{self._get_timestamp()}] Market closed (weekend)")
-                print(f"[{self._get_timestamp()}] Waiting until Monday {next_startup.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                
-                await asyncio.sleep(min(wait_seconds, 3600))
-                continue
-            
-            # Bot startup time: 2:01 PM CT (1 min after NVDA bot exits, 14 min before trade window)
-            bot_startup = now_ct.replace(hour=14, minute=1, second=0, microsecond=0)
-            
-            if now_ct < bot_startup:
-                wait_seconds = (bot_startup - now_ct).total_seconds()
-                print(f"[{self._get_timestamp()}] MSOS bot starts at 2:01 PM CT (1 min after NVDA exits, 14 min before trade window)")
-                print(f"[{self._get_timestamp()}] Waiting {wait_seconds:.0f} seconds...")
-                await asyncio.sleep(min(wait_seconds, 3600))
-                continue
-            
-            # Check if after exit time (2:58 PM CT)
-            if now_ct.time() >= EXIT_TIME:
-                # Wait until tomorrow 2:01 PM
-                next_startup = bot_startup + timedelta(days=1)
-                wait_seconds = (next_startup - now_ct).total_seconds()
-                
-                print(f"[{self._get_timestamp()}] Trading window closed for today")
-                print(f"[{self._get_timestamp()}] Waiting until tomorrow {next_startup.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                
-                await asyncio.sleep(min(wait_seconds, 3600))
-                continue
-            
-            # Bot is ready to start!
+        """Check if we're in trading window, exit if not (Railway will restart)"""
+        now_ct = datetime.now(TIMEZONE)
+        current_time = now_ct.time()
+        
+        # Bot startup time: 2:01 PM CT
+        bot_startup = time(14, 1)
+        
+        # If we're at or after 2:01 PM, we're good to proceed
+        if current_time >= bot_startup:
             print(f"[{self._get_timestamp()}] Bot startup time reached - fetching data and preparing for 2:15 PM trade window")
-            return
+            return True
+        
+        # Before 2:01 PM - calculate wait time
+        bot_startup_dt = now_ct.replace(hour=14, minute=1, second=0, microsecond=0)
+        wait_seconds = (bot_startup_dt - now_ct).total_seconds()
+        
+        # If more than 5 minutes away, exit and let Railway restart
+        if wait_seconds > 300:
+            print(f"[{self._get_timestamp()}] MSOS bot starts at 2:01 PM CT")
+            print(f"[{self._get_timestamp()}] {wait_seconds:.0f} seconds until startup")
+            print(f"[{self._get_timestamp()}] Exiting - Railway will restart closer to 2:01 PM")
+            await asyncio.sleep(30)
+            return False
+        else:
+            # Less than 5 minutes - wait for it
+            print(f"[{self._get_timestamp()}] MSOS bot starts at 2:01 PM CT (in {wait_seconds:.0f} seconds)")
+            print(f"[{self._get_timestamp()}] Waiting for startup time...")
+            await asyncio.sleep(wait_seconds)
+            print(f"[{self._get_timestamp()}] Bot startup time reached")
+            return True
     
     async def run(self):
         """Main bot loop"""
@@ -492,8 +477,31 @@ class MomentumTradingBot:
         print(f"MOMENTUM TRADING BOT STARTED")
         print(f"{'='*60}\n")
         
-        # Wait for trading window
-        await self.wait_for_trading_window()
+        # Check if we should run right now (prevent connecting to websockets when not needed)
+        now_ct = datetime.now(TIMEZONE)
+        current_time_ct = now_ct.time()
+        
+        # CRITICAL: Don't connect to Alpaca if NVDA bot should be running (before 2:00 PM CST)
+        # This prevents connection limit exceeded errors
+        if current_time_ct < time(14, 0):
+            print(f"[{self._get_timestamp()}] Current time: {now_ct.strftime('%H:%M:%S %Z')}")
+            print(f"[{self._get_timestamp()}] MSOS bot window not yet open (starts 2:01 PM CST)")
+            print(f"[{self._get_timestamp()}] NVDA bot time slot - exiting to avoid connection conflict")
+            print(f"[{self._get_timestamp()}] Railway will restart this bot and check again in 30 seconds")
+            await asyncio.sleep(30)  # Sleep before exit so Railway doesn't restart too fast
+            return
+        
+        # Check if after exit time
+        if current_time_ct >= EXIT_TIME:
+            print(f"[{self._get_timestamp()}] Current time: {now_ct.strftime('%H:%M:%S %Z')}")
+            print(f"[{self._get_timestamp()}] MSOS bot window closed for today (closes 2:58 PM CST)")
+            print(f"[{self._get_timestamp()}] Exiting - Railway will restart tomorrow")
+            await asyncio.sleep(30)
+            return
+        
+        # Wait for trading window (will only wait if between 2:00-2:01 PM)
+        if not await self.wait_for_trading_window():
+            return  # Exit if not in trading window
         
         # Fetch previous close
         if await self.fetch_previous_close() is None:

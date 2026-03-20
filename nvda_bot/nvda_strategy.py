@@ -142,54 +142,46 @@ class NVDAOpeningRangeBot:
         return False
     
     async def wait_for_market_open(self):
-        """Wait until market opens (9:30 AM ET on next trading day)"""
-        while True:
-            now_et = datetime.now(TIMEZONE_ET)
+        """Check if market is open, exit if not (Railway will restart)"""
+        now_et = datetime.now(TIMEZONE_ET)
+        
+        # Check if weekend
+        if now_et.weekday() >= 5:  # Saturday or Sunday
+            days_until_monday = (7 - now_et.weekday()) % 7
+            if days_until_monday == 0:
+                days_until_monday = 1
             
-            # Check if weekend
-            if now_et.weekday() >= 5:  # Saturday or Sunday
-                # Wait until Monday 9:30 AM
-                days_until_monday = (7 - now_et.weekday()) % 7
-                if days_until_monday == 0:
-                    days_until_monday = 1  # If Sunday, wait 1 day
-                
-                next_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
-                wait_seconds = (next_open - now_et).total_seconds()
-                
-                print(f"[{self._get_timestamp_et()}] Market closed (weekend)")
-                print(f"[{self._get_timestamp_et()}] Waiting until Monday {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                
-                # Sleep in chunks to avoid blocking
-                await asyncio.sleep(min(wait_seconds, 3600))  # Sleep max 1 hour at a time
-                continue
+            next_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
             
-            # Check if before market open today
-            market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            print(f"[{self._get_timestamp_et()}] Market closed (weekend)")
+            print(f"[{self._get_timestamp_et()}] Next open: Monday {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            print(f"[{self._get_timestamp_et()}] Exiting - Railway will restart closer to market open")
+            await asyncio.sleep(30)
+            return False
+        
+        # Check if before market open today
+        market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+        
+        if now_et < market_open_time:
+            wait_seconds = (market_open_time - now_et).total_seconds()
+            print(f"[{self._get_timestamp_et()}] Market opens at 9:30 AM ET")
+            print(f"[{self._get_timestamp_et()}] {wait_seconds:.0f} seconds until open")
             
-            if now_et < market_open_time:
-                wait_seconds = (market_open_time - now_et).total_seconds()
-                print(f"[{self._get_timestamp_et()}] Market opens at 9:30 AM ET")
-                print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds...")
-                await asyncio.sleep(min(wait_seconds, 3600))
-                continue
-            
-            # Check if after market close
-            market_close_time = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
-            
-            if now_et > market_close_time:
-                # Market closed for today, wait until tomorrow 9:30 AM
-                next_open = market_open_time + timedelta(days=1)
-                wait_seconds = (next_open - now_et).total_seconds()
-                
-                print(f"[{self._get_timestamp_et()}] Market closed for today")
-                print(f"[{self._get_timestamp_et()}] Waiting until tomorrow {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-                
-                await asyncio.sleep(min(wait_seconds, 3600))
-                continue
-            
-            # Market is open!
-            print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
-            return
+            # If more than 5 minutes away, exit and let Railway restart
+            if wait_seconds > 300:
+                print(f"[{self._get_timestamp_et()}] Exiting - Railway will restart closer to market open")
+                await asyncio.sleep(30)
+                return False
+            else:
+                # Less than 5 minutes - wait for it
+                print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for market open...")
+                await asyncio.sleep(wait_seconds)
+                print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
+                return True
+        
+        # Market is open!
+        print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
+        return True
     
     async def handle_nvda_bar(self, bar):
         """Handle incoming 1-minute NVDA bars for ORB tracking and 5-min aggregation"""
@@ -687,8 +679,24 @@ class NVDAOpeningRangeBot:
         print(f"NVDA 15-MIN OPENING RANGE BREAKOUT BOT STARTED")
         print(f"{'='*70}\n")
         
+        # Check if we should run right now (prevent connecting to websockets when not needed)
+        now_et = datetime.now(TIMEZONE_ET)
+        now_cst = datetime.now(pytz.timezone('America/Chicago'))
+        current_time_cst = now_cst.time()
+        
+        # CRITICAL: Don't connect to Alpaca if MSOS bot should be running (2:00 PM - 4:00 PM CST)
+        # This prevents connection limit exceeded errors
+        if time(14, 0) <= current_time_cst <= time(16, 0):
+            print(f"[{self._get_timestamp_et()}] Current time: {now_cst.strftime('%H:%M:%S %Z')}")
+            print(f"[{self._get_timestamp_et()}] NVDA bot window closed (2:00 PM CST - next day)")
+            print(f"[{self._get_timestamp_et()}] MSOS bot time slot - exiting to avoid connection conflict")
+            print(f"[{self._get_timestamp_et()}] Railway will restart this bot and check again in 30 seconds")
+            await asyncio.sleep(30)  # Sleep before exit so Railway doesn't restart too fast
+            return
+        
         # Wait for market to open
-        await self.wait_for_market_open()
+        if not await self.wait_for_market_open():
+            return  # Exit if market not open
         
         # Check for existing positions (in case of bot restart)
         print(f"\n[{self._get_timestamp_et()}] Checking for existing positions...")
