@@ -75,18 +75,20 @@ class NVDAOpeningRangeBot:
         self.orb_high = None
         self.orb_low = None
         self.orb_established = False
+        self.orb_tracking = False  # True when we're tracking ORB (9:30-9:45)
         self.position_entered = False
         self.position_side = None  # 'long' or 'short'
         self.entry_price = None
         self.entry_ticker = None
+        self.active_ticker = None  # Track which ticker we're monitoring (NVDL or NVD)
         self.shares = 0
         self.stop_loss_order_id = None
         self.profit_target_hit = False
         self.trades_today = 0
-        self.last_5min_candle_time = None
-        self.current_5min_high = None
-        self.current_5min_low = None
-        self.current_5min_close = None
+        
+        # Track 5-minute candles (after ORB)
+        self.current_5min_candle = {}  # Stores open, high, low, close for current 5-min candle
+        self.last_5min_start_time = None
         
         # Real-time price tracking for ETFs
         self.nvdl_current_price = None  # NVDL (2x Long) real-time price
@@ -189,77 +191,54 @@ class NVDAOpeningRangeBot:
             print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
             return
     
-    async def establish_opening_range(self):
-        """Fetch 15-minute opening range (9:30-9:45 AM ET)"""
-        print(f"\n[{self._get_timestamp_et()}] Establishing 15-minute Opening Range...")
-        
-        max_retries = 5
-        retry_delay = 60  # 60 seconds between retries
-        
-        for attempt in range(max_retries):
-            try:
-                now_et = datetime.now(TIMEZONE_ET)
+    async def handle_nvda_bar(self, bar):
+        """Handle incoming 1-minute NVDA bars for ORB tracking and 5-min aggregation"""
+        try:
+            current_time_et = self._get_current_time_et()
+            current_time_cst = self._get_current_time_cst()
+            bar_time = bar.timestamp.astimezone(TIMEZONE_ET).time()
+            
+            # Check for Golden Gap exit (2:00 PM CST)
+            if current_time_cst >= GOLDEN_GAP_EXIT:
+                if self.position_entered:
+                    await self.close_all_positions(f"GOLDEN GAP EXIT at {self._get_timestamp_cst()}")
+                print(f"[{self._get_timestamp_cst()}] Golden Gap exit time reached. Bot stopping.")
+                await self.stream.stop_ws()
+                return
+            
+            # Phase 1: Track ORB during 9:30-9:45 AM
+            if self.orb_tracking and not self.orb_established:
+                # Update running high/low
+                bar_high = float(bar.high)
+                bar_low = float(bar.low)
                 
-                # Set time range for ORB (9:30 AM - 9:45 AM ET today)
-                orb_start_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-                orb_end_time = now_et.replace(hour=9, minute=45, second=0, microsecond=0)
+                if self.orb_high is None:
+                    self.orb_high = bar_high
+                    self.orb_low = bar_low
+                else:
+                    self.orb_high = max(self.orb_high, bar_high)
+                    self.orb_low = min(self.orb_low, bar_low)
                 
-                # If current time is before ORB end, wait
-                if now_et < orb_end_time:
-                    wait_seconds = (orb_end_time - now_et).total_seconds()
-                    print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for ORB to complete...")
-                    await asyncio.sleep(wait_seconds + 10)  # Add 10 seconds buffer
-                
-                # Update time after waiting
-                now_et = datetime.now(TIMEZONE_ET)
-                print(f"[{self._get_timestamp_et()}] Fetching ORB data (attempt {attempt + 1}/{max_retries})...")
-                
-                # Fetch 1-minute bars for the opening range period
-                # We'll get all 1-min bars from 9:30-9:45 to calculate high/low
-                request = StockBarsRequest(
-                    symbol_or_symbols=MONITOR_TICKER,
-                    timeframe=TimeFrame.Minute,
-                    start=orb_start_time,
-                    end=orb_end_time,
-                    limit=20  # Request up to 20 bars (15 min period)
-                )
-                
-                bars = self.data_client.get_stock_bars(request)
-                
-                if MONITOR_TICKER in bars and len(bars[MONITOR_TICKER]) > 0:
-                    bar_list = bars[MONITOR_TICKER]
-                    print(f"[{self._get_timestamp_et()}] Received {len(bar_list)} bars for ORB calculation")
-                    
-                    self.orb_high = max([float(bar.high) for bar in bar_list])
-                    self.orb_low = min([float(bar.low) for bar in bar_list])
+                # Check if ORB period is complete (at or after 9:45 AM)
+                if bar_time >= ORB_END:
                     self.orb_established = True
+                    self.orb_tracking = False
                     
-                    print(f"[{self._get_timestamp_et()}] Opening Range Established (9:30-9:45 AM ET)")
+                    print(f"\n[{self._get_timestamp_et()}] ===== OPENING RANGE ESTABLISHED =====")
+                    print(f"[{self._get_timestamp_et()}] Time: 9:30-9:45 AM ET")
                     print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
                     print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
                     print(f"[{self._get_timestamp_et()}] ORB Range: ${self.orb_high - self.orb_low:.2f}")
-                    return True
-                else:
-                    print(f"[{self._get_timestamp_et()}] WARNING: No bar data returned (attempt {attempt + 1}/{max_retries})")
-                    
-                    if attempt < max_retries - 1:
-                        print(f"[{self._get_timestamp_et()}] Retrying in {retry_delay} seconds...")
-                        await asyncio.sleep(retry_delay)
-                    else:
-                        print(f"[{self._get_timestamp_et()}] ERROR: Failed to get ORB data after {max_retries} attempts")
-                        return False
-                
-            except Exception as e:
-                print(f"[{self._get_timestamp_et()}] ERROR establishing ORB (attempt {attempt + 1}/{max_retries}): {e}")
-                
-                if attempt < max_retries - 1:
-                    print(f"[{self._get_timestamp_et()}] Retrying in {retry_delay} seconds...")
-                    await asyncio.sleep(retry_delay)
-                else:
-                    print(f"[{self._get_timestamp_et()}] ERROR: Failed to establish ORB after {max_retries} attempts")
-                    return False
-        
-        return False
+                    print(f"[{self._get_timestamp_et()}] =====================================\n")
+                    print(f"[{self._get_timestamp_et()}] Now monitoring 5-minute candles for breakouts...\n")
+                return
+            
+            # Phase 2: After ORB, aggregate into 5-min candles
+            if self.orb_established and not self.position_entered and self.trades_today < MAX_TRADES_PER_DAY:
+                await self.aggregate_5min_candle(bar)
+            
+        except Exception as e:
+            print(f"[{self._get_timestamp_et()}] ERROR in handle_nvda_bar: {e}")
     
     def calculate_position_size(self, entry_price):
         """
@@ -483,78 +462,84 @@ class NVDAOpeningRangeBot:
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR closing positions: {e}")
     
-    async def handle_nvda_bar(self, bar):
-        """Handle incoming NVDA bar data (1-minute bars)"""
+    async def aggregate_5min_candle(self, bar):
+        """Aggregate 1-minute bars into 5-minute candles"""
         try:
-            current_time_et = self._get_current_time_et()
-            current_time_cst = self._get_current_time_cst()
-            bar_time = bar.timestamp.astimezone(TIMEZONE_ET).time()
+            bar_time = bar.timestamp.astimezone(TIMEZONE_ET)
             
-            # Check for Golden Gap exit (2:00 PM CST)
-            if current_time_cst >= GOLDEN_GAP_EXIT:
-                if self.position_entered:
-                    await self.close_all_positions(f"GOLDEN GAP EXIT at {self._get_timestamp_cst()}")
-                print(f"[{self._get_timestamp_cst()}] Golden Gap exit time reached. Bot stopping.")
-                await self.stream.stop_ws()
-                return
+            # Determine which 5-min period this bar belongs to
+            minute = bar_time.minute
+            period_start_minute = (minute // 5) * 5
+            period_start_time = bar_time.replace(minute=period_start_minute, second=0, microsecond=0)
             
-            # Update 5-minute candle tracking
-            bar_minute = bar_time.minute
-            
-            # Determine which 5-min candle this bar belongs to
-            candle_group = bar_minute // 5
-            candle_start_minute = candle_group * 5
-            candle_key = (bar_time.hour, candle_start_minute)
-            
-            # If new 5-min candle, reset tracking
-            if self.last_5min_candle_time != candle_key:
-                # Check previous 5-min candle for breakout before resetting
-                if (self.last_5min_candle_time is not None and 
-                    self.current_5min_close is not None and 
-                    self.orb_established and 
-                    not self.position_entered and 
-                    self.trades_today < MAX_TRADES_PER_DAY and
-                    current_time_et >= TRADING_START):
-                    
-                    await self.check_breakout_entry()
+            # If this is a new 5-min period, check previous candle for signals
+            if self.last_5min_start_time is not None and period_start_time != self.last_5min_start_time:
+                # Previous 5-min candle is complete - check for breakout
+                await self.check_5min_breakout()
                 
-                # Reset for new 5-min candle
-                self.last_5min_candle_time = candle_key
-                self.current_5min_high = float(bar.high)
-                self.current_5min_low = float(bar.low)
-                self.current_5min_close = float(bar.close)
+                # Reset for new candle
+                self.current_5min_candle = {
+                    'open': float(bar.open),
+                    'high': float(bar.high),
+                    'low': float(bar.low),
+                    'close': float(bar.close)
+                }
+                self.last_5min_start_time = period_start_time
+            elif self.last_5min_start_time is None:
+                # First bar after ORB
+                self.current_5min_candle = {
+                    'open': float(bar.open),
+                    'high': float(bar.high),
+                    'low': float(bar.low),
+                    'close': float(bar.close)
+                }
+                self.last_5min_start_time = period_start_time
             else:
-                # Update current 5-min candle
-                self.current_5min_high = max(self.current_5min_high, float(bar.high))
-                self.current_5min_low = min(self.current_5min_low, float(bar.low))
-                self.current_5min_close = float(bar.close)
-            
-        except Exception as e:
-            print(f"[{self._get_timestamp_et()}] ERROR in handle_nvda_bar: {e}")
-    
-    async def check_breakout_entry(self):
-        """Check if 5-min candle closed above/below ORB"""
-        try:
-            # Check if already have a position
-            if self.check_existing_position():
-                print(f"[{self._get_timestamp_et()}] Position already exists. Skipping entry.")
-                self.position_entered = True
-                return
-            
-            # Long entry: 5-min close above ORB high
-            if self.current_5min_close > self.orb_high:
-                print(f"\n[{self._get_timestamp_et()}] LONG BREAKOUT DETECTED!")
-                print(f"[{self._get_timestamp_et()}] 5-min Close: ${self.current_5min_close:.2f} > ORB High: ${self.orb_high:.2f}")
-                await self.place_trade_with_stop(LONG_TICKER, OrderSide.BUY, self.current_5min_close)
-            
-            # Short entry: 5-min close below ORB low
-            elif self.current_5min_close < self.orb_low:
-                print(f"\n[{self._get_timestamp_et()}] SHORT BREAKOUT DETECTED!")
-                print(f"[{self._get_timestamp_et()}] 5-min Close: ${self.current_5min_close:.2f} < ORB Low: ${self.orb_low:.2f}")
-                await self.place_trade_with_stop(SHORT_TICKER, OrderSide.BUY, self.current_5min_close)
+                # Same 5-min period - update candle
+                self.current_5min_candle['high'] = max(self.current_5min_candle['high'], float(bar.high))
+                self.current_5min_candle['low'] = min(self.current_5min_candle['low'], float(bar.low))
+                self.current_5min_candle['close'] = float(bar.close)
         
         except Exception as e:
-            print(f"[{self._get_timestamp_et()}] ERROR in check_breakout_entry: {e}")
+            print(f"[{self._get_timestamp_et()}] ERROR in aggregate_5min_candle: {e}")
+    
+    async def check_5min_breakout(self):
+        """Check if completed 5-min candle signals a breakout"""
+        try:
+            if not self.current_5min_candle:
+                return
+            
+            candle_open = self.current_5min_candle['open']
+            candle_close = self.current_5min_candle['close']
+            candle_high = self.current_5min_candle['high']
+            candle_low = self.current_5min_candle['low']
+            
+            print(f"[{self._get_timestamp_et()}] 5-min Candle Complete: O=${candle_open:.2f} H=${candle_high:.2f} L=${candle_low:.2f} C=${candle_close:.2f}")
+            
+            # Check if candle BODY is entirely above ORB High (LONG)
+            # Both open AND close must be above ORB high
+            if candle_open > self.orb_high and candle_close > self.orb_high:
+                print(f"\n[{self._get_timestamp_et()}] === LONG BREAKOUT DETECTED ===")
+                print(f"[{self._get_timestamp_et()}] Candle Body: Open=${candle_open:.2f}, Close=${candle_close:.2f}")
+                print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
+                print(f"[{self._get_timestamp_et()}] Body entirely above ORB High - LONG signal confirmed!")
+                await self.place_trade_with_stop(LONG_TICKER, OrderSide.BUY, candle_close)
+            
+            # Check if candle BODY is entirely below ORB Low (SHORT)
+            # Both open AND close must be below ORB low
+            elif candle_open < self.orb_low and candle_close < self.orb_low:
+                print(f"\n[{self._get_timestamp_et()}] === SHORT BREAKOUT DETECTED ===")
+                print(f"[{self._get_timestamp_et()}] Candle Body: Open=${candle_open:.2f}, Close=${candle_close:.2f}")
+                print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
+                print(f"[{self._get_timestamp_et()}] Body entirely below ORB Low - SHORT signal confirmed!")
+                await self.place_trade_with_stop(SHORT_TICKER, OrderSide.BUY, candle_close)
+            else:
+                # No breakout - just log ORB reference
+                print(f"[{self._get_timestamp_et()}] No breakout (ORB High: ${self.orb_high:.2f}, ORB Low: ${self.orb_low:.2f})")
+        
+        except Exception as e:
+            print(f"[{self._get_timestamp_et()}] ERROR in check_5min_breakout: {e}")
+    
     
     async def handle_nvdl_trade(self, data):
         """Handle incoming NVDL trade data - used for profit target and position monitoring"""
@@ -640,32 +625,34 @@ class NVDAOpeningRangeBot:
         # Wait for market to open
         await self.wait_for_market_open()
         
-        # Establish opening range
-        if not await self.establish_opening_range():
-            print(f"[{self._get_timestamp_et()}] Failed to establish ORB. Exiting.")
-            return
-        
-        print(f"\n[{self._get_timestamp_et()}] STRATEGY SUMMARY:")
-        print(f"[{self._get_timestamp_et()}] Long Entry: NVDA 5-min close > ${self.orb_high:.2f} → Buy {LONG_TICKER}")
-        print(f"[{self._get_timestamp_et()}] Short Entry: NVDA 5-min close < ${self.orb_low:.2f} → Buy {SHORT_TICKER}")
+        print(f"\n[{self._get_timestamp_et()}] STRATEGY CONFIGURATION:")
+        print(f"[{self._get_timestamp_et()}] Phase 1 (9:30-9:45 AM): Track 15-min ORB")
+        print(f"[{self._get_timestamp_et()}] Phase 2 (After 9:45 AM): Monitor 5-min candles for breakouts")
+        print(f"[{self._get_timestamp_et()}] Long Entry: 5-min body entirely above ORB High → Buy {LONG_TICKER}")
+        print(f"[{self._get_timestamp_et()}] Short Entry: 5-min body entirely below ORB Low → Buy {SHORT_TICKER}")
         print(f"[{self._get_timestamp_et()}] Max Trades: {MAX_TRADES_PER_DAY}")
         print(f"[{self._get_timestamp_et()}] Exit Strategy:")
         print(f"[{self._get_timestamp_et()}]   Stage 1: {HARD_STOP_PCT}% Hard Stop Loss")
         print(f"[{self._get_timestamp_et()}]   Stage 2: {PROFIT_TARGET_PCT}% Profit → {TRAILING_STOP_PCT}% Trailing Stop")
-        print(f"[{self._get_timestamp_et()}]   Stage 3: Golden Gap Exit at 2:00 PM CST")
-        print(f"[{self._get_timestamp_et()}] Monitoring NVDA 5-min candles...\n")
+        print(f"[{self._get_timestamp_et()}]   Stage 3: Golden Gap Exit at 2:00 PM CST\n")
         
-        # Subscribe to NVDA 1-minute bars (to track 5-min candles for entry signals)
+        # Mark that we're tracking ORB
+        self.orb_tracking = True
+        
+        # Subscribe to 1-minute bars for NVDA
+        # - During 9:30-9:45: Tracks high/low to build ORB
+        # - After 9:45: Aggregates into 5-min candles for breakout signals
+        print(f"[{self._get_timestamp_et()}] Subscribing to {MONITOR_TICKER} live bars...")
         self.stream.subscribe_bars(self.handle_nvda_bar, MONITOR_TICKER)
         
         # Subscribe to NVDL and NVD trade streams (for real-time position monitoring)
         self.stream.subscribe_trades(self.handle_nvdl_trade, LONG_TICKER)
         self.stream.subscribe_trades(self.handle_nvd_trade, SHORT_TICKER)
         
-        print(f"[{self._get_timestamp_et()}] Subscribed to {MONITOR_TICKER} live bar stream (entry signals)")
-        print(f"[{self._get_timestamp_et()}] Subscribed to {LONG_TICKER} live trade stream (long position monitoring)")
-        print(f"[{self._get_timestamp_et()}] Subscribed to {SHORT_TICKER} live trade stream (short position monitoring)")
-        print(f"[{self._get_timestamp_et()}] Waiting for breakout signals...\n")
+        print(f"[{self._get_timestamp_et()}] Subscribed to {MONITOR_TICKER} bars (ORB + entry signals)")
+        print(f"[{self._get_timestamp_et()}] Subscribed to {LONG_TICKER} trades (position monitoring)")
+        print(f"[{self._get_timestamp_et()}] Subscribed to {SHORT_TICKER} trades (position monitoring)")
+        print(f"[{self._get_timestamp_et()}] Tracking 9:30-9:45 AM opening range...\n")
         
         # Run the stream
         await self.stream.run()
