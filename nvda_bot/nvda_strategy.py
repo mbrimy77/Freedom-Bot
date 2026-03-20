@@ -21,10 +21,10 @@ from alpaca.trading.requests import (
     StopLossRequest,
     TrailingStopOrderRequest
 )
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.live import StockDataStream
-from alpaca.data.requests import StockBarsRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
 from alpaca.data.timeframe import TimeFrame
 
 # Load environment variables
@@ -283,26 +283,55 @@ class NVDAOpeningRangeBot:
             print(f"[{self._get_timestamp_et()}] ERROR checking positions: {e}")
             return False
     
-    async def place_trade_with_stop(self, ticker: str, side: OrderSide, entry_price: float):
+    async def get_latest_price(self, ticker: str):
+        """Get the latest quote price for a ticker"""
+        try:
+            request = StockLatestQuoteRequest(symbol_or_symbols=ticker)
+            latest_quote = self.data_client.get_stock_latest_quote(request)
+            
+            if ticker in latest_quote:
+                ask_price = float(latest_quote[ticker].ask_price)
+                bid_price = float(latest_quote[ticker].bid_price)
+                mid_price = (ask_price + bid_price) / 2
+                
+                print(f"[{self._get_timestamp_et()}] {ticker} Latest Quote - Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}, Mid: ${mid_price:.2f}")
+                return mid_price
+            else:
+                print(f"[{self._get_timestamp_et()}] ERROR: No quote data for {ticker}")
+                return None
+        except Exception as e:
+            print(f"[{self._get_timestamp_et()}] ERROR getting latest price for {ticker}: {e}")
+            return None
+    
+    async def place_trade_with_stop(self, ticker: str, side: OrderSide, nvda_signal_price: float):
         """Place trade with bracket order (entry + stop loss)"""
         try:
-            # Calculate position size
-            shares = self.calculate_position_size(entry_price)
+            print(f"\n[{self._get_timestamp_et()}] {'LONG' if side == OrderSide.BUY else 'SHORT'} SIGNAL DETECTED")
+            print(f"[{self._get_timestamp_et()}] NVDA Signal Price: ${nvda_signal_price:.2f}")
             
-            if shares <= 0:
-                print(f"[{self._get_timestamp_et()}] ERROR: Invalid position size")
+            # Get the actual current price of the ETF we're trading
+            etf_price = await self.get_latest_price(ticker)
+            if etf_price is None:
+                print(f"[{self._get_timestamp_et()}] ERROR: Could not get price for {ticker}. Order cancelled.")
                 return False
             
-            # Calculate stop loss price
+            # Calculate position size based on ETF price (not NVDA price!)
+            shares = self.calculate_position_size(etf_price)
+            
+            if shares <= 0:
+                print(f"[{self._get_timestamp_et()}] ERROR: Invalid position size ({shares} shares)")
+                return False
+            
+            # Calculate stop loss price based on ETF price
             if side == OrderSide.BUY:
-                stop_price = entry_price * (1 - HARD_STOP_PCT / 100)
+                stop_price = etf_price * (1 - HARD_STOP_PCT / 100)
             else:
-                stop_price = entry_price * (1 + HARD_STOP_PCT / 100)
+                stop_price = etf_price * (1 + HARD_STOP_PCT / 100)
             
             print(f"\n[{self._get_timestamp_et()}] PLACING {'LONG' if side == OrderSide.BUY else 'SHORT'} ORDER")
             print(f"[{self._get_timestamp_et()}] Ticker: {ticker}")
             print(f"[{self._get_timestamp_et()}] Shares: {shares}")
-            print(f"[{self._get_timestamp_et()}] Entry Price: ${entry_price:.2f}")
+            print(f"[{self._get_timestamp_et()}] Expected Entry: ${etf_price:.2f}")
             print(f"[{self._get_timestamp_et()}] Stop Loss: ${stop_price:.2f} ({HARD_STOP_PCT}%)")
             
             # Submit market order with stop loss
@@ -318,27 +347,48 @@ class NVDAOpeningRangeBot:
             order = self.trading_client.submit_order(order_data)
             print(f"[{self._get_timestamp_et()}] Order submitted - Order ID: {order.id}")
             
-            self.position_entered = True
-            self.position_side = 'long' if side == OrderSide.BUY else 'short'
-            self.entry_ticker = ticker
-            self.entry_price = entry_price
-            self.shares = shares
-            self.trades_today += 1
+            # Wait for order to fill and verify
+            await asyncio.sleep(3)
             
-            # Initialize price tracking for trailing stop
-            self.highest_price_since_entry = entry_price
-            self.lowest_price_since_entry = entry_price
+            # Check order status
+            filled_order = self.trading_client.get_order_by_id(order.id)
             
-            # Wait for order to fill
-            await asyncio.sleep(2)
-            
-            # Get stop loss order ID
-            await self.get_child_orders(order.id)
-            
-            return True
+            if filled_order.status == 'filled':
+                actual_fill_price = float(filled_order.filled_avg_price)
+                print(f"[{self._get_timestamp_et()}] ✓ ORDER FILLED at ${actual_fill_price:.2f}")
+                
+                # NOW set position state (only after confirming fill)
+                self.position_entered = True
+                self.position_side = 'long' if side == OrderSide.BUY else 'short'
+                self.entry_ticker = ticker
+                self.entry_price = actual_fill_price
+                self.shares = shares
+                self.trades_today += 1
+                
+                # Initialize price tracking for trailing stop
+                self.highest_price_since_entry = actual_fill_price
+                self.lowest_price_since_entry = actual_fill_price
+                
+                # Get stop loss order ID
+                await self.get_child_orders(order.id)
+                
+                return True
+            else:
+                print(f"[{self._get_timestamp_et()}] ✗ ORDER NOT FILLED - Status: {filled_order.status}")
+                print(f"[{self._get_timestamp_et()}] Reason: {filled_order.status}")
+                
+                # Cancel the order if it's still pending
+                try:
+                    self.trading_client.cancel_order_by_id(order.id)
+                    print(f"[{self._get_timestamp_et()}] Order cancelled")
+                except:
+                    pass
+                
+                return False
             
         except Exception as e:
-            print(f"[{self._get_timestamp_et()}] ERROR placing order: {e}")
+            print(f"[{self._get_timestamp_et()}] ✗ ERROR placing order: {e}")
+            print(f"[{self._get_timestamp_et()}] Position NOT entered due to error")
             return False
     
     async def get_child_orders(self, parent_order_id):
@@ -523,6 +573,13 @@ class NVDAOpeningRangeBot:
                 print(f"[{self._get_timestamp_et()}] Candle Body: Open=${candle_open:.2f}, Close=${candle_close:.2f}")
                 print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
                 print(f"[{self._get_timestamp_et()}] Body entirely above ORB High - LONG signal confirmed!")
+                
+                # Check for existing position before entering
+                if self.check_existing_position():
+                    print(f"[{self._get_timestamp_et()}] Position already exists. Skipping entry.")
+                    self.position_entered = True
+                    return
+                
                 await self.place_trade_with_stop(LONG_TICKER, OrderSide.BUY, candle_close)
             
             # Check if candle BODY is entirely below ORB Low (SHORT)
@@ -532,6 +589,13 @@ class NVDAOpeningRangeBot:
                 print(f"[{self._get_timestamp_et()}] Candle Body: Open=${candle_open:.2f}, Close=${candle_close:.2f}")
                 print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
                 print(f"[{self._get_timestamp_et()}] Body entirely below ORB Low - SHORT signal confirmed!")
+                
+                # Check for existing position before entering
+                if self.check_existing_position():
+                    print(f"[{self._get_timestamp_et()}] Position already exists. Skipping entry.")
+                    self.position_entered = True
+                    return
+                
                 await self.place_trade_with_stop(SHORT_TICKER, OrderSide.BUY, candle_close)
             else:
                 # No breakout - just log ORB reference
@@ -624,6 +688,16 @@ class NVDAOpeningRangeBot:
         
         # Wait for market to open
         await self.wait_for_market_open()
+        
+        # Check for existing positions (in case of bot restart)
+        print(f"\n[{self._get_timestamp_et()}] Checking for existing positions...")
+        if self.check_existing_position():
+            print(f"[{self._get_timestamp_et()}] WARNING: Existing position found at startup")
+            print(f"[{self._get_timestamp_et()}] Bot will monitor existing position but not enter new trades today")
+            self.position_entered = True
+            self.trades_today = MAX_TRADES_PER_DAY
+        else:
+            print(f"[{self._get_timestamp_et()}] No existing positions found - ready to trade")
         
         print(f"\n[{self._get_timestamp_et()}] STRATEGY CONFIGURATION:")
         print(f"[{self._get_timestamp_et()}] Phase 1 (9:30-9:45 AM): Track 15-min ORB")

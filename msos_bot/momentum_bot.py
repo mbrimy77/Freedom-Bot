@@ -197,35 +197,58 @@ class MomentumTradingBot:
             )
             
             order = self.trading_client.submit_order(order_data)
-            print(f"[{self._get_timestamp()}] Order submitted successfully - Order ID: {order.id}")
+            print(f"[{self._get_timestamp()}] Order submitted - Order ID: {order.id}")
             
-            self.position_entered = True
-            self.position_side = 'long' if side == OrderSide.BUY else 'short'
-            self.active_ticker = ticker_to_trade
+            # Wait for order to fill
+            await asyncio.sleep(3)
             
-            # Wait a moment for order to fill
-            await asyncio.sleep(2)
+            # Verify order filled before setting position state
+            fill_success = await self.get_fill_price(order.id)
             
-            # Get fill price
-            await self.get_fill_price(order.id)
+            if fill_success:
+                # Only set position state AFTER confirming fill
+                self.position_entered = True
+                self.position_side = 'long' if side == OrderSide.BUY else 'short'
+                self.active_ticker = ticker_to_trade
+                print(f"[{self._get_timestamp()}] ✓ Position entered successfully")
+            else:
+                print(f"[{self._get_timestamp()}] ✗ Position NOT entered - order did not fill")
             
         except Exception as e:
-            print(f"[{self._get_timestamp()}] ERROR placing order: {e}")
+            print(f"[{self._get_timestamp()}] ✗ ERROR placing order: {e}")
+            print(f"[{self._get_timestamp()}] Position NOT entered due to error")
     
     async def get_fill_price(self, order_id):
-        """Get the fill price of the order"""
+        """Get the fill price of the order and verify it filled"""
         try:
             order = self.trading_client.get_order_by_id(order_id)
-            if order.filled_avg_price:
+            
+            if order.status == 'filled' and order.filled_avg_price:
                 self.entry_price = float(order.filled_avg_price)
-                print(f"[{self._get_timestamp()}] Order filled at: ${self.entry_price:.2f}")
+                print(f"[{self._get_timestamp()}] ✓ ORDER FILLED at: ${self.entry_price:.2f}")
                 
                 # Initialize trailing stop tracking
                 self.highest_price_since_entry = self.entry_price
                 self.lowest_price_since_entry = self.entry_price
                 self.update_trailing_stop(self.entry_price)
+                
+                return True
+            else:
+                print(f"[{self._get_timestamp()}] ✗ ORDER NOT FILLED - Status: {order.status}")
+                
+                # Try to cancel if still pending
+                try:
+                    if order.status in ['pending_new', 'accepted', 'new', 'partially_filled']:
+                        self.trading_client.cancel_order_by_id(order_id)
+                        print(f"[{self._get_timestamp()}] Order cancelled")
+                except:
+                    pass
+                
+                return False
+                
         except Exception as e:
-            print(f"[{self._get_timestamp()}] ERROR getting fill price: {e}")
+            print(f"[{self._get_timestamp()}] ✗ ERROR getting fill price: {e}")
+            return False
     
     def update_trailing_stop(self, current_price):
         """Update trailing stop loss level based on MSOX price"""
@@ -476,6 +499,16 @@ class MomentumTradingBot:
         if await self.fetch_previous_close() is None:
             print(f"[{self._get_timestamp()}] Failed to fetch previous close. Exiting.")
             return
+        
+        # Check for existing positions (in case of bot restart)
+        print(f"\n[{self._get_timestamp()}] Checking for existing positions...")
+        if self.check_existing_position():
+            print(f"[{self._get_timestamp()}] WARNING: Existing position found at startup")
+            print(f"[{self._get_timestamp()}] Bot will monitor existing position but not enter new trades today")
+            self.position_entered = True
+            self.was_stopped_out = True
+        else:
+            print(f"[{self._get_timestamp()}] No existing positions found - ready to trade")
         
         # Calculate trigger levels
         buy_trigger = self.previous_close * (1 + TRIGGER_THRESHOLD / 100)
