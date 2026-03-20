@@ -35,12 +35,13 @@ The 15-minute "Golden Gap" (2:00 PM - 2:15 PM) ensures capital is liquid and ava
 
 ### The "Golden Gap" (2:00 PM - 2:15 PM CST)
 
-The 15-minute buffer between bot schedules ensures:
+NVDA bot exits at 2:00 PM CST, and MSOS bot starts at 2:01 PM CST but doesn't enter trades until 2:15 PM. This ensures:
 
 1. NVDA positions are fully closed and settled
-2. Buying power is updated in Alpaca account
-3. Full $20,000 capital is available for MSOS bot
-4. No collision between strategies
+2. Alpaca websocket connection is freed (no connection limit issues)
+3. Buying power is updated in Alpaca account
+4. Full $20,000 capital is available for MSOS bot
+5. No collision between strategies
 
 ## Repository Structure
 
@@ -135,7 +136,9 @@ EXIT_TIME = time(14, 58)         # 2:58 PM CT
 
 **2:00 PM CST** - **GOLDEN GAP**: NVDA bot closes all positions and stops
 
-**2:15 PM CST** - MSOS bot starts monitoring for momentum signals
+**2:01 PM CST** - MSOS bot starts up and connects to Alpaca
+
+**2:15 PM CST** - MSOS bot begins monitoring for momentum signals (entry window opens)
 
 **2:30 PM CST** - MSOS bot entry window closes
 

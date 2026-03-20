@@ -440,18 +440,18 @@ class MomentumTradingBot:
         return False
     
     async def wait_for_trading_window(self):
-        """Wait until MSOS bot startup (2:00 PM CT) to prepare for trading"""
+        """Wait until MSOS bot startup (2:01 PM CT) to prepare for trading"""
         while True:
             now_ct = datetime.now(TIMEZONE)
             
             # Check if weekend
             if now_ct.weekday() >= 5:
-                # Wait until Monday 2:00 PM CT
+                # Wait until Monday 2:01 PM CT
                 days_until_monday = (7 - now_ct.weekday()) % 7
                 if days_until_monday == 0:
                     days_until_monday = 1
                 
-                next_startup = now_ct.replace(hour=14, minute=0, second=0, microsecond=0) + timedelta(days=days_until_monday)
+                next_startup = now_ct.replace(hour=14, minute=1, second=0, microsecond=0) + timedelta(days=days_until_monday)
                 wait_seconds = (next_startup - now_ct).total_seconds()
                 
                 print(f"[{self._get_timestamp()}] Market closed (weekend)")
@@ -460,19 +460,19 @@ class MomentumTradingBot:
                 await asyncio.sleep(min(wait_seconds, 3600))
                 continue
             
-            # Bot startup time: 2:00 PM CT (to prepare data before 2:15 PM trade window)
-            bot_startup = now_ct.replace(hour=14, minute=0, second=0, microsecond=0)
+            # Bot startup time: 2:01 PM CT (1 min after NVDA bot exits, 14 min before trade window)
+            bot_startup = now_ct.replace(hour=14, minute=1, second=0, microsecond=0)
             
             if now_ct < bot_startup:
                 wait_seconds = (bot_startup - now_ct).total_seconds()
-                print(f"[{self._get_timestamp()}] MSOS bot starts at 2:00 PM CT (15 min before trade window)")
+                print(f"[{self._get_timestamp()}] MSOS bot starts at 2:01 PM CT (1 min after NVDA exits, 14 min before trade window)")
                 print(f"[{self._get_timestamp()}] Waiting {wait_seconds:.0f} seconds...")
                 await asyncio.sleep(min(wait_seconds, 3600))
                 continue
             
             # Check if after exit time (2:58 PM CT)
             if now_ct.time() >= EXIT_TIME:
-                # Wait until tomorrow 2:00 PM
+                # Wait until tomorrow 2:01 PM
                 next_startup = bot_startup + timedelta(days=1)
                 wait_seconds = (next_startup - now_ct).total_seconds()
                 
