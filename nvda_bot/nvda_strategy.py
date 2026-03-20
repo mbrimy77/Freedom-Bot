@@ -310,15 +310,15 @@ class NVDAOpeningRangeBot:
     
     def calculate_position_size(self, entry_price):
         """
-        Calculate shares based on:
-        - Use FULL $20,000 account size
+        Calculate shares for $20K position size
+        - Target position: $20,000
         - ETF is 2x leveraged
         
-        Formula: shares = ACCOUNT_SIZE / entry_price
+        Formula: shares = $20,000 / entry_price
         """
         leverage = 2.0
         
-        # Use full account to calculate shares
+        # Calculate shares for $20K position
         shares = int(ACCOUNT_SIZE / entry_price)
         
         notional_value = shares * entry_price
@@ -331,7 +331,7 @@ class NVDAOpeningRangeBot:
         print(f"[{self._get_timestamp_et()}]   Entry Price: ${entry_price:.2f}")
         print(f"[{self._get_timestamp_et()}]   Shares: {shares}")
         print(f"[{self._get_timestamp_et()}]   Notional Value: ${notional_value:.2f}")
-        print(f"[{self._get_timestamp_et()}]   Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of account)")
+        print(f"[{self._get_timestamp_et()}]   Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of position)")
         
         return shares
     
