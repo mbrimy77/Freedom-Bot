@@ -277,6 +277,14 @@ Review Alpaca dashboard daily to track:
 
 ## Troubleshooting
 
+**Connection limit exceeded errors:**
+- **Root cause**: Alpaca paper trading allows only 1 websocket connection at a time
+- **Check Railway dashboard**: Ensure each bot service has **exactly 1 replica** (not 2+)
+- **Check both bots**: Make sure NVDA exits before MSOS starts (2:00 PM vs 2:01 PM CST)
+- **Old deployments**: In Railway, delete any old/stopped deployments that might be lingering
+- **Solution**: The bots now exit gracefully on connection errors and Railway restarts them
+- **railway.toml** sets `numReplicas = 1` to prevent auto-scaling
+
 **NVDA bot doesn't establish ORB:**
 - Check market is open 9:30-9:45 AM ET
 - Verify NVDA has sufficient trading volume
