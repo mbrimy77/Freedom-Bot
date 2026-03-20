@@ -515,9 +515,13 @@ if __name__ == "__main__":
     except RuntimeError as e:
         if "asyncio.run() cannot be called from a running event loop" in str(e):
             # Railway environment - event loop already exists
-            # Get the existing loop and run the coroutine
-            loop = asyncio.get_event_loop()
-            loop.create_task(main())
-            loop.run_forever()
+            # Get or create event loop and run until complete
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            loop.run_until_complete(main())
         else:
             raise
