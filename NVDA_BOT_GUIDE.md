@@ -133,7 +133,9 @@ Railway auto-deploys on every push to main branch.
 NVDA Bot Starting...
 Connection successful - Account: PA3OVLQ636WP
 Connection lock acquired
-Ready to trade - ORB period active or upcoming
+Checking for unexpected positions...
+✅ No unexpected positions - ready to trade
+✅ Ready to trade - ORB period active or upcoming
 ```
 
 **✅ ORB establishment:**
@@ -150,26 +152,81 @@ ORB Range: $0.17
 PLACING LONG ORDER
 Ticker: NVDL
 Shares: 1142
-SUCCESS: ORDER FILLED at $17.52
+======================================================================
+✅ TRADE OPENED - CONFIRMED WITH ALPACA ✅
+======================================================================
+Order ID: abc-123
+Symbol: NVDL
+Side: LONG
+Shares Filled: 1142
+Fill Price: $17.52
+Position Value: $20,015.84
+Stop Loss: $17.26 (-1.5%)
+Status: FILLED
+✅ POSITION VERIFIED IN ALPACA:
+   Symbol: NVDL
+   Qty: 1142.0
+   Current Price: $17.52
+   Market Value: $20,015.84
 ```
 
 **✅ Clean exit:**
 ```
-END OF DAY EXIT at 2026-03-20 14:30:00 CDT
-=== FINAL TRADE SUMMARY ===
-Final P&L: $127.50 (+0.74%)
-Position closed successfully
-Websocket closed successfully
+======================================================================
+CLOSING ALL POSITIONS - END OF DAY EXIT at 2026-03-24 14:30:00 CDT
+======================================================================
+Symbol: NVDL
+Side: long
+Entry Price: $17.52
+Exit Price: $17.89
+Price Change: $0.37 (+2.11%)
+Shares: 1142
+Market Value: $20,434.38
+Final P&L: $422.54 (+2.11%)
+
+Closing position...
+✅ Close order submitted to Alpaca
+✅ POSITION CLOSED - VERIFIED WITH ALPACA
+   NVDL position no longer exists in account
+
+✅ No pending orders to cancel
+======================================================================
+
+[2026-03-24 15:30:00 EDT] Websocket closed successfully
+[INFO] Connection lock released
 ```
 
 ### Red Flags (Should NOT appear):
+
+**❌ Unexpected position detected:**
+```
+⚠️  UNEXPECTED POSITION DETECTED - BOT STOPPING ⚠️
+======================================================================
+Symbol: NVDL
+Shares: 1142
+Current Price: $17.52
+Market Value: $20,015.84
+Unrealized P&L: $422.54
+
+POSSIBLE CAUSES:
+  1. Position from previous day didn't close (check yesterday's logs)
+  2. Manual trade entered in Alpaca dashboard
+  3. Bot crashed before closing position
+  4. Another bot/strategy using same account
+```
+**Solution:** 
+1. Go to Alpaca dashboard immediately
+2. Check the position - is it yours? From yesterday?
+3. Review yesterday's logs for close confirmations
+4. Close position manually in Alpaca if it's an error
+5. Railway will restart bot automatically after you fix it
 
 **❌ Connection errors:**
 ```
 connection limit exceeded
 HTTP 429
 ```
-**Solution:** Check Railway replicas = 1, restart service
+**Solution:** Check Railway replicas = 1, restart service (should not happen with single bot)
 
 **❌ Late start:**
 ```
@@ -200,11 +257,11 @@ ERROR: Another instance holds the connection lock
 - Automatically resets after 5 minutes of stable operation
 - Protects against Alpaca API rate limits
 
-### 3. Stale Position Cleanup
-- Automatically closes leftover positions from previous days
-- Runs during pre-market (before 9:30 AM)
-- Logs full position details (P&L, shares, price)
-- Ensures clean slate for new trading day
+### 3. Unexpected Position Detection
+- Detects positions that shouldn't exist (leftover from previous day)
+- **STOPS THE BOT** if unexpected position found
+- Logs full position details and requires manual review
+- Prevents auto-closing positions that might be intentional
 
 ### 4. Time Window Enforcement
 - Refuses to trade if starting after ORB period
@@ -268,8 +325,9 @@ Bot runs in paper trading mode (no real money at risk):
 
 ### Before Market Open (9:00 AM ET)
 - [ ] Check Railway service is running
-- [ ] Verify no stale positions in Alpaca dashboard
-- [ ] Review previous day's logs for issues
+- [ ] **CRITICAL:** Verify NO positions exist in Alpaca dashboard (all should be closed from previous day)
+- [ ] Review previous day's logs to confirm clean exit at 2:30 PM CST
+- [ ] If unexpected position found, bot will STOP and alert you
 
 ### During Trading (9:30 AM - 3:30 PM ET)
 - [ ] Monitor Railway logs for ORB establishment (9:45 AM)
