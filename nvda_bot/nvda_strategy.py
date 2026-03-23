@@ -327,29 +327,41 @@ class NVDAOpeningRangeBot:
             
             # Phase 1: Track ORB during 9:30-9:45 AM
             if self.orb_tracking and not self.orb_established:
-                # Update running high/low
+                # CRITICAL: Check if ORB period is complete BEFORE processing this bar
+                # This ensures we only include bars from 9:30-9:44 (15 minutes exactly)
+                if bar_time >= ORB_END:
+                    self.orb_established = True
+                    self.orb_tracking = False
+                    
+                    # Verify we have valid ORB data
+                    if self.orb_high is None or self.orb_low is None:
+                        print(f"\n[{self._get_timestamp_et()}] ⚠️  ERROR: No bars received during ORB period!")
+                        print(f"[{self._get_timestamp_et()}] Cannot establish Opening Range - no trading today")
+                        print(f"[{self._get_timestamp_et()}] This usually means Alpaca websocket had connection issues")
+                        self.trades_today = MAX_TRADES_PER_DAY  # Prevent trading
+                        return
+                    
+                    print(f"\n[{self._get_timestamp_et()}] ===== OPENING RANGE ESTABLISHED =====")
+                    print(f"[{self._get_timestamp_et()}] Time: 9:30-9:45 AM ET (15 minutes)")
+                    print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
+                    print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
+                    print(f"[{self._get_timestamp_et()}] ORB Range: ${self.orb_high - self.orb_low:.2f}")
+                    print(f"[{self._get_timestamp_et()}] =====================================\n")
+                    print(f"[{self._get_timestamp_et()}] Now monitoring 5-minute candles for breakouts...\n")
+                    return  # Exit WITHOUT processing the 9:45 bar
+                
+                # Now process the bar (only bars before 9:45 AM)
                 bar_high = float(bar.high)
                 bar_low = float(bar.low)
                 
                 if self.orb_high is None:
                     self.orb_high = bar_high
                     self.orb_low = bar_low
+                    print(f"[{self._get_timestamp_et()}] ORB tracking started - First bar: High=${bar_high:.2f}, Low=${bar_low:.2f}")
                 else:
                     self.orb_high = max(self.orb_high, bar_high)
                     self.orb_low = min(self.orb_low, bar_low)
                 
-                # Check if ORB period is complete (at or after 9:45 AM)
-                if bar_time >= ORB_END:
-                    self.orb_established = True
-                    self.orb_tracking = False
-                    
-                    print(f"\n[{self._get_timestamp_et()}] ===== OPENING RANGE ESTABLISHED =====")
-                    print(f"[{self._get_timestamp_et()}] Time: 9:30-9:45 AM ET")
-                    print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
-                    print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
-                    print(f"[{self._get_timestamp_et()}] ORB Range: ${self.orb_high - self.orb_low:.2f}")
-                    print(f"[{self._get_timestamp_et()}] =====================================\n")
-                    print(f"[{self._get_timestamp_et()}] Now monitoring 5-minute candles for breakouts...\n")
                 return
             
             # Phase 2: After ORB, aggregate into 5-min candles
@@ -882,6 +894,11 @@ class NVDAOpeningRangeBot:
         """Check if completed 5-min candle signals a breakout"""
         try:
             if not self.current_5min_candle:
+                return
+            
+            # Safety check: Ensure ORB was established before checking breakouts
+            if self.orb_high is None or self.orb_low is None:
+                print(f"[{self._get_timestamp_et()}] WARNING: ORB not established - cannot check breakouts")
                 return
             
             candle_open = self.current_5min_candle['open']
