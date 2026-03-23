@@ -4,7 +4,7 @@ NVDA 15-Minute Opening Range Breakout (ORB) Strategy
 - Trades NVDL (2x Long) or NVD (2x Short) based on 5-min candle closes
 - Position sizing: 1.5% move = $300 loss on $20k account
 - Dual-stage exit: 1.5% hard stop -> 3% profit triggers 1% trailing stop
-- Hard exit at 2:00 PM CST (Golden Gap for MSOS bot at 2:15 PM)
+- Hard exit at 2:30 PM CST / 3:30 PM ET
 - Maximum one trade per day
 """
 
@@ -48,7 +48,7 @@ MAX_TRADES_PER_DAY = 1         # Maximum one trade per day
 ORB_START = time(9, 30)        # 9:30 AM ET (ORB start)
 ORB_END = time(9, 45)          # 9:45 AM ET (ORB end)
 TRADING_START = time(9, 45)    # 9:45 AM ET (start monitoring for breakouts)
-GOLDEN_GAP_EXIT = time(14, 0)  # 2:00 PM CST (hard exit for MSOS buffer)
+END_OF_DAY_EXIT = time(14, 30)  # 2:30 PM CST / 3:30 PM ET (end of trading day)
 
 TIMEZONE_ET = pytz.timezone('America/New_York')
 TIMEZONE_CST = pytz.timezone('America/Chicago')
@@ -317,11 +317,11 @@ class NVDAOpeningRangeBot:
             current_time_cst = self._get_current_time_cst()
             bar_time = bar.timestamp.astimezone(TIMEZONE_ET).time()
             
-            # Check for Golden Gap exit (2:00 PM CST)
-            if current_time_cst >= GOLDEN_GAP_EXIT:
+            # Check for end of day exit (2:30 PM CST)
+            if current_time_cst >= END_OF_DAY_EXIT:
                 if self.position_entered:
-                    await self.close_all_positions(f"GOLDEN GAP EXIT at {self._get_timestamp_cst()}")
-                print(f"[{self._get_timestamp_cst()}] Golden Gap exit time reached. Bot stopping.")
+                    await self.close_all_positions(f"END OF DAY EXIT at {self._get_timestamp_cst()}")
+                print(f"[{self._get_timestamp_cst()}] End of trading day reached. Bot stopping.")
                 await self.stream.stop_ws()
                 return
             
@@ -398,6 +398,42 @@ class NVDAOpeningRangeBot:
             return False
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR checking positions: {e}")
+            return False
+    
+    async def close_stale_positions(self):
+        """Close any leftover positions from previous trading days"""
+        try:
+            positions = self.trading_client.get_all_positions()
+            closed_any = False
+            
+            for position in positions:
+                if position.symbol in [LONG_TICKER, SHORT_TICKER]:
+                    qty = float(position.qty)
+                    current_price = float(position.current_price)
+                    unrealized_pl = float(position.unrealized_pl)
+                    
+                    print(f"\n[{self._get_timestamp_et()}] ===== STALE POSITION DETECTED =====")
+                    print(f"[{self._get_timestamp_et()}] Symbol: {position.symbol}")
+                    print(f"[{self._get_timestamp_et()}] Shares: {int(qty)}")
+                    print(f"[{self._get_timestamp_et()}] Current Price: ${current_price:.2f}")
+                    print(f"[{self._get_timestamp_et()}] Unrealized P&L: ${unrealized_pl:.2f}")
+                    print(f"[{self._get_timestamp_et()}] Closing leftover position from previous day...")
+                    
+                    # Close the position
+                    self.trading_client.close_position(position.symbol)
+                    print(f"[{self._get_timestamp_et()}] Position closed successfully")
+                    print(f"[{self._get_timestamp_et()}] ===================================\n")
+                    closed_any = True
+            
+            if closed_any:
+                # Wait a moment for orders to process
+                await asyncio.sleep(2)
+                print(f"[{self._get_timestamp_et()}] Stale position cleanup complete - ready for new trading day")
+            
+            return closed_any
+            
+        except Exception as e:
+            print(f"[{self._get_timestamp_et()}] ERROR closing stale positions: {e}")
             return False
     
     async def get_latest_price(self, ticker: str):
@@ -488,7 +524,7 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"\n[{self._get_timestamp_et()}] ===== EXIT STRATEGY ACTIVE =====")
                 log_and_flush(f"[{self._get_timestamp_et()}] 1. HARD STOP @ ${stop_price:.2f} (-{HARD_STOP_PCT}%) - Set on Alpaca, executes automatically")
                 log_and_flush(f"[{self._get_timestamp_et()}] 2. PROFIT TARGET @ ${actual_fill_price * (1 + PROFIT_TARGET_PCT / 100):.2f} (+{PROFIT_TARGET_PCT}%) - Upgrades to {TRAILING_STOP_PCT}% trailing stop")
-                log_and_flush(f"[{self._get_timestamp_et()}] 3. GOLDEN GAP EXIT @ 2:00 PM CST - Forced exit regardless of P&L")
+                log_and_flush(f"[{self._get_timestamp_et()}] 3. END OF DAY EXIT @ 2:30 PM CST (3:30 PM ET) - Forced exit regardless of P&L")
                 log_and_flush(f"[{self._get_timestamp_et()}] Monitoring position for stop hits and profit target...")
                 log_and_flush(f"[{self._get_timestamp_et()}] =================================\n")
                 
@@ -624,8 +660,14 @@ class NVDAOpeningRangeBot:
                     
                     print(f"[{self._get_timestamp_et()}] === FINAL TRADE SUMMARY ===")
                     print(f"[{self._get_timestamp_et()}] Symbol: {position.symbol}")
-                    print(f"[{self._get_timestamp_et()}] Entry Price: ${self.entry_price:.2f}")
-                    print(f"[{self._get_timestamp_et()}] Exit Price: ${current_price:.2f}")
+                    
+                    # Only show entry price if we have it (bot may have restarted with existing position)
+                    if self.entry_price is not None:
+                        print(f"[{self._get_timestamp_et()}] Entry Price: ${self.entry_price:.2f}")
+                        print(f"[{self._get_timestamp_et()}] Exit Price: ${current_price:.2f}")
+                    else:
+                        print(f"[{self._get_timestamp_et()}] Exit Price: ${current_price:.2f} (Entry price unknown - position existed at startup)")
+                    
                     print(f"[{self._get_timestamp_et()}] Shares: {int(qty)}")
                     print(f"[{self._get_timestamp_et()}] Final P&L: ${final_pl:.2f} ({final_pl_pct:+.2f}%)")
                     print(f"[{self._get_timestamp_et()}] ==========================")
@@ -774,10 +816,10 @@ class NVDAOpeningRangeBot:
                 self.position_side = None
                 return
             
-            # Check for Golden Gap exit
-            if current_time_cst >= GOLDEN_GAP_EXIT:
-                await self.close_all_positions(f"GOLDEN GAP EXIT at {self._get_timestamp_cst()}")
-                print(f"[{self._get_timestamp_cst()}] Golden Gap exit time reached. Bot stopping.")
+            # Check for end of day exit
+            if current_time_cst >= END_OF_DAY_EXIT:
+                await self.close_all_positions(f"END OF DAY EXIT at {self._get_timestamp_cst()}")
+                print(f"[{self._get_timestamp_cst()}] End of trading day reached. Bot stopping.")
                 await self.stream.stop_ws()
                 return
             
@@ -832,10 +874,10 @@ class NVDAOpeningRangeBot:
                 self.position_side = None
                 return
             
-            # Check for Golden Gap exit
-            if current_time_cst >= GOLDEN_GAP_EXIT:
-                await self.close_all_positions(f"GOLDEN GAP EXIT at {self._get_timestamp_cst()}")
-                print(f"[{self._get_timestamp_cst()}] Golden Gap exit time reached. Bot stopping.")
+            # Check for end of day exit
+            if current_time_cst >= END_OF_DAY_EXIT:
+                await self.close_all_positions(f"END OF DAY EXIT at {self._get_timestamp_cst()}")
+                print(f"[{self._get_timestamp_cst()}] End of trading day reached. Bot stopping.")
                 await self.stream.stop_ws()
                 return
             
@@ -878,48 +920,65 @@ class NVDAOpeningRangeBot:
             await asyncio.sleep(60)
             return
         
-        # STEP 2: Check if we should run right now (prevent connecting to websockets when not needed)
-        now_et = datetime.now(TIMEZONE_ET)
-        now_cst = datetime.now(pytz.timezone('America/Chicago'))
-        current_time_cst = now_cst.time()
-        
-        # CRITICAL: Don't connect to Alpaca if MSOS bot should be running (2:00 PM - 4:00 PM CST)
-        # This prevents connection limit exceeded errors
-        if time(14, 0) <= current_time_cst <= time(16, 0):
-            log_and_flush(f"[{self._get_timestamp_et()}] Current time: {now_cst.strftime('%H:%M:%S %Z')}")
-            log_and_flush(f"[{self._get_timestamp_et()}] NVDA bot window closed (2:00 PM CST - next day)")
-            log_and_flush(f"[{self._get_timestamp_et()}] MSOS bot time slot - exiting to avoid connection conflict")
-            log_and_flush(f"[{self._get_timestamp_et()}] Railway will restart this bot and check again")
-            await asyncio.sleep(30)
-            return
-        
-        # STEP 3: Wait for market to open
+        # STEP 2: Wait for market to open
         if not await self.wait_for_market_open():
             return  # Exit if market not open
         
-        # STEP 4: Acquire connection lock to prevent multiple instances
+        # STEP 3: Acquire connection lock to prevent multiple instances
         if not await acquire_connection_lock():
             log_and_flush(f"[ERROR] Cannot acquire connection lock - another instance is running")
             log_and_flush(f"[ERROR] Exiting to prevent connection limit errors")
             await asyncio.sleep(30)
             return
         
-        # STEP 5: Test Alpaca API connection BEFORE subscribing to websockets
+        # STEP 4: Test Alpaca API connection BEFORE subscribing to websockets
         if not await test_alpaca_connection(self.trading_client):
             log_and_flush(f"[ERROR] Cannot connect to Alpaca API - exiting")
             release_connection_lock()
             await asyncio.sleep(30)
             return
         
+        # STEP 6: Close any stale positions from previous days (before market open)
+        now_et = datetime.now(TIMEZONE_ET)
+        if now_et.time() < time(9, 30):
+            print(f"\n[{self._get_timestamp_et()}] Pre-market check: Looking for stale positions...")
+            await self.close_stale_positions()
+        
         # Check for existing positions (in case of bot restart)
         print(f"\n[{self._get_timestamp_et()}] Checking for existing positions...")
+        now_et = datetime.now(TIMEZONE_ET)
+        current_time_et = now_et.time()
+        
         if self.check_existing_position():
             print(f"[{self._get_timestamp_et()}] WARNING: Existing position found at startup")
             print(f"[{self._get_timestamp_et()}] Bot will monitor existing position but not enter new trades today")
             self.position_entered = True
             self.trades_today = MAX_TRADES_PER_DAY
+            
+            # Try to get position details for monitoring
+            try:
+                positions = self.trading_client.get_all_positions()
+                for position in positions:
+                    if position.symbol in [LONG_TICKER, SHORT_TICKER]:
+                        self.entry_ticker = position.symbol
+                        # We don't know the actual entry price, but we can track from current
+                        current_price = float(position.current_price)
+                        self.highest_price_since_entry = current_price
+                        self.lowest_price_since_entry = current_price
+                        print(f"[{self._get_timestamp_et()}] Tracking {position.symbol} position - Current price: ${current_price:.2f}")
+            except Exception as e:
+                print(f"[{self._get_timestamp_et()}] WARNING: Could not get position details: {e}")
         else:
-            print(f"[{self._get_timestamp_et()}] No existing positions found - ready to trade")
+            print(f"[{self._get_timestamp_et()}] No existing positions found")
+            
+            # Check if we missed the ORB window
+            if current_time_et > time(9, 45):
+                print(f"[{self._get_timestamp_et()}] WARNING: Started after ORB period (9:30-9:45 AM ET)")
+                print(f"[{self._get_timestamp_et()}] Cannot establish Opening Range - no new trades today")
+                print(f"[{self._get_timestamp_et()}] Will monitor until end of day exit at 2:30 PM CST")
+                self.trades_today = MAX_TRADES_PER_DAY  # Prevent trading
+            else:
+                print(f"[{self._get_timestamp_et()}] Ready to trade - ORB period active or upcoming")
         
         print(f"\n[{self._get_timestamp_et()}] STRATEGY CONFIGURATION:")
         print(f"[{self._get_timestamp_et()}] Phase 1 (9:30-9:45 AM): Track 15-min ORB")
@@ -930,10 +989,18 @@ class NVDAOpeningRangeBot:
         print(f"[{self._get_timestamp_et()}] Exit Strategy:")
         print(f"[{self._get_timestamp_et()}]   Stage 1: {HARD_STOP_PCT}% Hard Stop Loss")
         print(f"[{self._get_timestamp_et()}]   Stage 2: {PROFIT_TARGET_PCT}% Profit -> {TRAILING_STOP_PCT}% Trailing Stop")
-        print(f"[{self._get_timestamp_et()}]   Stage 3: Golden Gap Exit at 2:00 PM CST\n")
+        print(f"[{self._get_timestamp_et()}]   Stage 3: End of Day Exit at 2:30 PM CST (3:30 PM ET)")
+        print(f"[{self._get_timestamp_et()}] Trading Window: 9:30 AM - 3:30 PM ET (6 hours)\n")
         
-        # Mark that we're tracking ORB
-        self.orb_tracking = True
+        # Mark that we're tracking ORB (only if before 9:45 AM)
+        now_et = datetime.now(TIMEZONE_ET)
+        if now_et.time() <= ORB_END:
+            self.orb_tracking = True
+            log_and_flush(f"[{self._get_timestamp_et()}] ORB tracking enabled - will track 9:30-9:45 AM range")
+        else:
+            self.orb_tracking = False
+            self.orb_established = True  # Skip ORB since we're past the window
+            log_and_flush(f"[{self._get_timestamp_et()}] ORB period already passed - no new trades today")
         
         # Subscribe to data streams - CRITICAL: Do this BEFORE connecting
         # All subscriptions are batched into a SINGLE websocket connection
@@ -966,8 +1033,8 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"[{self._get_timestamp_et()}] ")
                 log_and_flush(f"[{self._get_timestamp_et()}] Possible causes:")
                 log_and_flush(f"[{self._get_timestamp_et()}]   1. Railway running multiple replicas (SET REPLICAS TO 1)")
-                log_and_flush(f"[{self._get_timestamp_et()}]   2. MSOS bot still connected (check time window)")
-                log_and_flush(f"[{self._get_timestamp_et()}]   3. Previous instance didn't close properly")
+                log_and_flush(f"[{self._get_timestamp_et()}]   2. Previous instance didn't close properly")
+                log_and_flush(f"[{self._get_timestamp_et()}]   3. Another bot or service using same API keys")
                 log_and_flush(f"[{self._get_timestamp_et()}] ")
                 log_and_flush(f"[{self._get_timestamp_et()}] SOLUTION:")
                 log_and_flush(f"[{self._get_timestamp_et()}]   1. Go to Railway dashboard")
@@ -1004,16 +1071,36 @@ async def main():
     # CRITICAL: Check time BEFORE creating bot to avoid websocket connection race condition
     # When Railway deploys both bots simultaneously, they both try to connect at once
     # This check prevents NVDA from even attempting connection during MSOS time window
-    now_cst = datetime.now(pytz.timezone('America/Chicago'))
+    now_et = datetime.now(TIMEZONE_ET)
+    now_cst = datetime.now(TIMEZONE_CST)
+    current_time_et = now_et.time()
     current_time_cst = now_cst.time()
     
-    # NVDA bot should NOT run between 2:00 PM - 4:00 PM CST (MSOS time)
-    if time(14, 0) <= current_time_cst <= time(16, 0):
-        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] NVDA bot window closed (2:00 PM CST - next day)")
-        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] MSOS bot time slot - exiting WITHOUT connecting to Alpaca")
-        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Railway will restart this bot and check again")
-        await asyncio.sleep(30)
+    log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] NVDA Bot Starting...")
+    log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time ET: {current_time_et}")
+    log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time CST: {current_time_cst}")
+    
+    # NVDA bot should NOT run after end of day exit time (2:30 PM CST / 3:30 PM ET)
+    if current_time_cst >= END_OF_DAY_EXIT:
+        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Trading window closed (after 2:30 PM CST)")
+        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Next run: Tomorrow at 9:15 AM ET")
+        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Railway will restart tomorrow")
+        await asyncio.sleep(60)
         return
+    
+    # NVDA bot should NOT run after market close (4:00 PM ET)
+    if current_time_et >= time(16, 0):
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Market closed for today")
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Next run: Tomorrow at 9:15 AM ET")
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Railway will restart tomorrow")
+        await asyncio.sleep(60)
+        return
+    
+    # Check if we missed the ORB window (after 9:45 AM ET)
+    if current_time_et > time(9, 45):
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] WARNING: Starting after ORB period (9:30-9:45 AM ET)")
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Bot will check for existing positions but won't enter new trades")
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Reason: Cannot establish Opening Range after 9:45 AM")
     
     # Time check passed - safe to create bot and connect
     bot = NVDAOpeningRangeBot()
