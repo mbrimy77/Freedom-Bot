@@ -335,7 +335,7 @@ class NVDAOpeningRangeBot:
                     
                     # Verify we have valid ORB data
                     if self.orb_high is None or self.orb_low is None:
-                        print(f"\n[{self._get_timestamp_et()}] ⚠️  ERROR: No bars received during ORB period!")
+                        print(f"\n[{self._get_timestamp_et()}] ERROR: No bars received during ORB period!")
                         print(f"[{self._get_timestamp_et()}] Cannot establish Opening Range - no trading today")
                         print(f"[{self._get_timestamp_et()}] This usually means Alpaca websocket had connection issues")
                         self.trades_today = MAX_TRADES_PER_DAY  # Prevent trading
@@ -431,7 +431,7 @@ class NVDAOpeningRangeBot:
                     market_value = float(position.market_value)
                     
                     log_and_flush(f"\n{'='*70}")
-                    log_and_flush(f"⚠️  UNEXPECTED POSITION DETECTED - BOT STOPPING ⚠️")
+                    log_and_flush(f"UNEXPECTED POSITION DETECTED - BOT STOPPING")
                     log_and_flush(f"{'='*70}")
                     log_and_flush(f"Symbol: {position.symbol}")
                     log_and_flush(f"Shares: {int(qty)}")
@@ -541,7 +541,7 @@ class NVDAOpeningRangeBot:
                 filled_qty = float(filled_order.filled_qty)
                 
                 log_and_flush(f"\n{'='*70}")
-                log_and_flush(f"✅ TRADE OPENED - CONFIRMED WITH ALPACA ✅")
+                log_and_flush(f"TRADE OPENED - CONFIRMED WITH ALPACA")
                 log_and_flush(f"{'='*70}")
                 log_and_flush(f"Order ID: {order.id}")
                 log_and_flush(f"Symbol: {ticker}")
@@ -557,13 +557,13 @@ class NVDAOpeningRangeBot:
                 # Verify position exists in Alpaca
                 try:
                     position = self.trading_client.get_open_position(ticker)
-                    log_and_flush(f"✅ POSITION VERIFIED IN ALPACA:")
+                    log_and_flush(f"POSITION VERIFIED IN ALPACA:")
                     log_and_flush(f"   Symbol: {position.symbol}")
                     log_and_flush(f"   Qty: {float(position.qty)}")
                     log_and_flush(f"   Current Price: ${float(position.current_price):.2f}")
                     log_and_flush(f"   Market Value: ${float(position.market_value):.2f}\n")
                 except Exception as e:
-                    log_and_flush(f"⚠️  WARNING: Could not verify position in Alpaca: {e}\n")
+                    log_and_flush(f"WARNING: Could not verify position in Alpaca: {e}\n")
                 
                 # NOW set position state (only after confirming fill)
                 self.position_entered = True
@@ -665,7 +665,7 @@ class NVDAOpeningRangeBot:
             # Check if profit target hit
             if unrealized_pl >= (ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100):
                 log_and_flush(f"\n{'='*70}")
-                log_and_flush(f"🎯 PROFIT TARGET HIT - UPGRADING TO TRAILING STOP 🎯")
+                log_and_flush(f"PROFIT TARGET HIT - UPGRADING TO TRAILING STOP")
                 log_and_flush(f"{'='*70}")
                 log_and_flush(f"Current P&L: ${unrealized_pl:.2f} (Target: ${ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100:.2f})")
                 log_and_flush(f"Current Price: ${current_price:.2f}")
@@ -685,12 +685,12 @@ class NVDAOpeningRangeBot:
                     )
                     
                     trailing_order = self.trading_client.submit_order(trailing_stop_request)
-                    log_and_flush(f"✅ Trailing Stop order placed - Order ID: {trailing_order.id}")
+                    log_and_flush(f"Trailing Stop order placed - Order ID: {trailing_order.id}")
                     await asyncio.sleep(0.5)  # Brief pause to ensure order is active
                     
                 except Exception as e:
-                    log_and_flush(f"❌ ERROR placing trailing stop: {e}")
-                    log_and_flush(f"⚠️  KEEPING HARD STOP ACTIVE - Did not cancel for safety")
+                    log_and_flush(f"ERROR placing trailing stop: {e}")
+                    log_and_flush(f"KEEPING HARD STOP ACTIVE - Did not cancel for safety")
                     log_and_flush(f"{'='*70}\n")
                     return  # Keep hard stop if trailing stop fails
                 
@@ -698,18 +698,18 @@ class NVDAOpeningRangeBot:
                 if self.stop_loss_order_id and trailing_order:
                     try:
                         self.trading_client.cancel_order_by_id(self.stop_loss_order_id)
-                        log_and_flush(f"✅ Hard stop canceled (replaced by trailing stop)")
+                        log_and_flush(f"Hard stop canceled (replaced by trailing stop)")
                         self.stop_loss_order_id = trailing_order.id
                         self.profit_target_hit = True
                     except Exception as e:
-                        log_and_flush(f"⚠️  WARNING: Error canceling hard stop: {e}")
+                        log_and_flush(f"WARNING: Error canceling hard stop: {e}")
                         log_and_flush(f"   Both stops may be active temporarily")
                         log_and_flush(f"   Trailing stop will manage position going forward")
                         self.stop_loss_order_id = trailing_order.id
                         self.profit_target_hit = True
                 
                 log_and_flush(f"")
-                log_and_flush(f"✅ UPGRADE COMPLETE")
+                log_and_flush(f"UPGRADE COMPLETE")
                 log_and_flush(f"   Protection: {TRAILING_STOP_PCT}% Trailing Stop now active")
                 log_and_flush(f"   Stop will move up as price increases")
                 log_and_flush(f"{'='*70}\n")
@@ -770,13 +770,13 @@ class NVDAOpeningRangeBot:
                             for stop in stop_orders_found:
                                 log_and_flush(f"   - Type: {stop['type']}, ID: {stop['id']}")
                     except Exception as e:
-                        log_and_flush(f"⚠️  Could not check for stop orders: {e}")
+                        log_and_flush(f"Could not check for stop orders: {e}")
                     
                     # STEP 2: Close the position (Alpaca should cancel stops automatically)
                     log_and_flush(f"")
                     log_and_flush(f"Closing position...")
                     self.trading_client.close_position(position.symbol)
-                    log_and_flush(f"✅ Close order submitted to Alpaca")
+                    log_and_flush(f"Close order submitted to Alpaca")
                     log_and_flush(f"   (Alpaca will auto-cancel associated stop orders)")
                     
                     # STEP 3: Wait for close to process
@@ -786,13 +786,13 @@ class NVDAOpeningRangeBot:
                     try:
                         check_position = self.trading_client.get_open_position(position.symbol)
                         log_and_flush(f"")
-                        log_and_flush(f"⚠️  WARNING: Position still exists after close attempt!")
+                        log_and_flush(f"WARNING: Position still exists after close attempt!")
                         log_and_flush(f"   Current qty: {float(check_position.qty)}")
                         log_and_flush(f"   Check Alpaca dashboard immediately!")
                     except Exception:
                         # Position doesn't exist = successfully closed
                         log_and_flush(f"")
-                        log_and_flush(f"✅ POSITION CLOSED - VERIFIED WITH ALPACA")
+                        log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
                         log_and_flush(f"   {position.symbol} position no longer exists in account")
                     
                     # STEP 5: Verify stop orders were canceled
@@ -811,32 +811,32 @@ class NVDAOpeningRangeBot:
                                         stops_still_active.append(stop['id'])
                             
                             if stops_still_active:
-                                log_and_flush(f"⚠️  WARNING: {len(stops_still_active)} stop order(s) still active!")
+                                log_and_flush(f"WARNING: {len(stops_still_active)} stop order(s) still active!")
                                 log_and_flush(f"   Manually canceling...")
                                 for order_id in stops_still_active:
                                     try:
                                         self.trading_client.cancel_order_by_id(order_id)
-                                        log_and_flush(f"   ✅ Canceled stop order: {order_id}")
+                                        log_and_flush(f"   Canceled stop order: {order_id}")
                                     except Exception as e:
-                                        log_and_flush(f"   ❌ Could not cancel {order_id}: {e}")
+                                        log_and_flush(f"   Could not cancel {order_id}: {e}")
                             else:
-                                log_and_flush(f"✅ All stop orders automatically canceled by Alpaca")
+                                log_and_flush(f"All stop orders automatically canceled by Alpaca")
                         except Exception as e:
-                            log_and_flush(f"⚠️  Could not verify stop cancellation: {e}")
+                            log_and_flush(f"Could not verify stop cancellation: {e}")
             
             # STEP 6: Final check - cancel any remaining pending orders
             try:
                 remaining_orders = self.trading_client.get_orders()
                 if remaining_orders:
                     log_and_flush(f"")
-                    log_and_flush(f"⚠️  Found {len(remaining_orders)} remaining order(s) - canceling...")
+                    log_and_flush(f"Found {len(remaining_orders)} remaining order(s) - canceling...")
                     self.trading_client.cancel_orders()
-                    log_and_flush(f"✅ All remaining orders canceled")
+                    log_and_flush(f"All remaining orders canceled")
                 else:
                     log_and_flush(f"")
-                    log_and_flush(f"✅ No pending orders remaining")
+                    log_and_flush(f"No pending orders remaining")
             except Exception as e:
-                log_and_flush(f"⚠️  WARNING: Error checking pending orders: {e}")
+                log_and_flush(f"WARNING: Error checking pending orders: {e}")
             
             log_and_flush(f"{'='*70}\n")
             
@@ -846,7 +846,7 @@ class NVDAOpeningRangeBot:
             self.entry_ticker = None
             
         except Exception as e:
-            log_and_flush(f"❌ ERROR closing positions: {e}")
+            log_and_flush(f"ERROR closing positions: {e}")
             log_and_flush(f"Check Alpaca dashboard immediately: https://app.alpaca.markets/paper/dashboard/overview")
     
     async def aggregate_5min_candle(self, bar):
@@ -966,14 +966,14 @@ class NVDAOpeningRangeBot:
                     expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
                     
                     log_and_flush(f"\n{'='*70}")
-                    log_and_flush(f"🛑 STOP LOSS HIT - POSITION CLOSED BY ALPACA 🛑")
+                    log_and_flush(f"STOP LOSS HIT - POSITION CLOSED BY ALPACA")
                     log_and_flush(f"{'='*70}")
                     log_and_flush(f"Symbol: {LONG_TICKER}")
                     log_and_flush(f"Entry Price: ${self.entry_price:.2f}")
                     log_and_flush(f"Expected Stop: ${expected_stop:.2f}")
                     log_and_flush(f"Estimated Loss: ${(expected_stop - self.entry_price) * self.shares:.2f} (-{HARD_STOP_PCT}%)")
                     log_and_flush(f"")
-                    log_and_flush(f"✅ POSITION CLOSED - VERIFIED WITH ALPACA")
+                    log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
                     log_and_flush(f"   {LONG_TICKER} position no longer exists in account")
                     log_and_flush(f"   Check Alpaca dashboard for exact fill price")
                     log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
@@ -985,12 +985,12 @@ class NVDAOpeningRangeBot:
             except Exception as e:
                 # Exception means position doesn't exist
                 log_and_flush(f"\n{'='*70}")
-                log_and_flush(f"🛑 POSITION CLOSED - STOP LOSS TRIGGERED 🛑")
+                log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
                 log_and_flush(f"{'='*70}")
                 log_and_flush(f"Symbol: {LONG_TICKER}")
                 log_and_flush(f"Position no longer exists in Alpaca account")
                 log_and_flush(f"")
-                log_and_flush(f"✅ CLOSURE VERIFIED WITH ALPACA")
+                log_and_flush(f"CLOSURE VERIFIED WITH ALPACA")
                 log_and_flush(f"   Likely stop loss order executed")
                 log_and_flush(f"   Check dashboard for exact exit details:")
                 log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
@@ -1045,14 +1045,14 @@ class NVDAOpeningRangeBot:
                     expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
                     
                     log_and_flush(f"\n{'='*70}")
-                    log_and_flush(f"🛑 STOP LOSS HIT - POSITION CLOSED BY ALPACA 🛑")
+                    log_and_flush(f"STOP LOSS HIT - POSITION CLOSED BY ALPACA")
                     log_and_flush(f"{'='*70}")
                     log_and_flush(f"Symbol: {SHORT_TICKER}")
                     log_and_flush(f"Entry Price: ${self.entry_price:.2f}")
                     log_and_flush(f"Expected Stop: ${expected_stop:.2f}")
                     log_and_flush(f"Estimated Loss: ${(expected_stop - self.entry_price) * self.shares:.2f} (-{HARD_STOP_PCT}%)")
                     log_and_flush(f"")
-                    log_and_flush(f"✅ POSITION CLOSED - VERIFIED WITH ALPACA")
+                    log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
                     log_and_flush(f"   {SHORT_TICKER} position no longer exists in account")
                     log_and_flush(f"   Check Alpaca dashboard for exact fill price")
                     log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
@@ -1064,12 +1064,12 @@ class NVDAOpeningRangeBot:
             except Exception as e:
                 # Exception means position doesn't exist
                 log_and_flush(f"\n{'='*70}")
-                log_and_flush(f"🛑 POSITION CLOSED - STOP LOSS TRIGGERED 🛑")
+                log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
                 log_and_flush(f"{'='*70}")
                 log_and_flush(f"Symbol: {SHORT_TICKER}")
                 log_and_flush(f"Position no longer exists in Alpaca account")
                 log_and_flush(f"")
-                log_and_flush(f"✅ CLOSURE VERIFIED WITH ALPACA")
+                log_and_flush(f"CLOSURE VERIFIED WITH ALPACA")
                 log_and_flush(f"   Likely stop loss order executed")
                 log_and_flush(f"   Check dashboard for exact exit details:")
                 log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
@@ -1146,13 +1146,13 @@ class NVDAOpeningRangeBot:
         # STEP 5: Check for unexpected positions from previous days
         log_and_flush(f"\n[{self._get_timestamp_et()}] Checking for unexpected positions...")
         if self.check_for_unexpected_positions():
-            log_and_flush(f"[{self._get_timestamp_et()}] ⚠️  UNEXPECTED POSITION FOUND - STOPPING BOT ⚠️")
+            log_and_flush(f"[{self._get_timestamp_et()}] UNEXPECTED POSITION FOUND - STOPPING BOT")
             log_and_flush(f"[{self._get_timestamp_et()}] Manual intervention required - see details above")
             release_connection_lock()
             await asyncio.sleep(60)  # Give time to read logs
             return
         
-        log_and_flush(f"[{self._get_timestamp_et()}] ✅ No unexpected positions - ready to trade")
+        log_and_flush(f"[{self._get_timestamp_et()}] No unexpected positions - ready to trade")
         
         # STEP 6: Check if we can trade today (verify ORB window not missed)
         log_and_flush(f"\n[{self._get_timestamp_et()}] Checking trading day status...")
@@ -1161,12 +1161,12 @@ class NVDAOpeningRangeBot:
         
         # Check if we missed the ORB window
         if current_time_et > time(9, 45):
-            log_and_flush(f"[{self._get_timestamp_et()}] ⚠️  WARNING: Started after ORB period (9:30-9:45 AM ET)")
+            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Started after ORB period (9:30-9:45 AM ET)")
             log_and_flush(f"[{self._get_timestamp_et()}] Cannot establish Opening Range - no new trades today")
             log_and_flush(f"[{self._get_timestamp_et()}] Will monitor existing positions only until 2:30 PM CST exit")
             self.trades_today = MAX_TRADES_PER_DAY  # Prevent trading
         else:
-            log_and_flush(f"[{self._get_timestamp_et()}] ✅ Ready to trade - ORB period active or upcoming")
+            log_and_flush(f"[{self._get_timestamp_et()}] Ready to trade - ORB period active or upcoming")
         
         print(f"\n[{self._get_timestamp_et()}] STRATEGY CONFIGURATION:")
         print(f"[{self._get_timestamp_et()}] Phase 1 (9:30-9:45 AM): Track 15-min ORB")
