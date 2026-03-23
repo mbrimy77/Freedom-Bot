@@ -14,30 +14,26 @@ Your repository should have this structure:
 
 ```
 your-repo/
-├── msos_bot/
-│   ├── momentum_bot.py
-│   └── requirements.txt
 ├── nvda_bot/
 │   ├── nvda_strategy.py
 │   ├── requirements.txt
+│   ├── railway.toml
 │   ├── README.md
 │   └── .gitignore
 └── README.md
 ```
 
-Push both folders to GitHub:
+Push the folder to GitHub:
 
 ```bash
-git add msos_bot/ nvda_bot/
-git commit -m "Add NVDA and MSOS trading bots"
+git add nvda_bot/
+git commit -m "Add NVDA trading bot"
 git push origin main
 ```
 
-### 2. Create Railway Projects
+### 2. Create Railway Project
 
-#### Option A: Single Project, Two Services (Recommended)
-
-1. Go to Railway dashboard
+1. Go to Railway dashboard (https://railway.app)
 2. Click "New Project"
 3. Select "Deploy from GitHub repo"
 4. Choose your repository
@@ -48,25 +44,12 @@ git push origin main
 - **Settings** → **Root Directory**: `/nvda_bot`
 - **Settings** → **Start Command**: `python nvda_strategy.py`
 - **Variables** tab:
-  - Add `ALPACA_API_KEY`: (your key)
-  - Add `ALPACA_SECRET_KEY`: (your secret)
-
-**Create MSOS Service:**
-- Click "Add Service" → "GitHub Repo"  
-- **Service Name**: `msos-bot`
-- **Settings** → **Root Directory**: `/msos_bot`
-- **Settings** → **Start Command**: `python momentum_bot.py`
-- **Variables** tab:
-  - Add `ALPACA_API_KEY`: (your key)
-  - Add `ALPACA_SECRET_KEY`: (your secret)
-
-#### Option B: Two Separate Projects
-
-Create two separate Railway projects (one for NVDA, one for MSOS) and configure each with the appropriate root directory.
+  - Add `ALPACA_API_KEY`: (your Alpaca API key)
+  - Add `ALPACA_SECRET_KEY`: (your Alpaca secret key)
 
 ### 3. Configure Environment Variables
 
-For each service, add these environment variables in Railway:
+In Railway, add these environment variables:
 
 ```
 ALPACA_API_KEY=PK...
@@ -79,51 +62,44 @@ ALPACA_SECRET_KEY=...
 - **Runtime**: Python 3.11+
 - **Root Directory**: `/nvda_bot`
 - **Start Command**: `python nvda_strategy.py`
-- **Region**: Choose closest to your location
-
-**MSOS Bot Settings:**
-- **Runtime**: Python 3.11+
-- **Root Directory**: `/msos_bot`
-- **Start Command**: `python momentum_bot.py`
-- **Region**: Same as NVDA bot
+- **Replicas**: 1 (CRITICAL - must be exactly 1)
+- **Restart Policy**: ON_FAILURE
+- **Max Retries**: 10
+- **Region**: Choose closest to your location (US East or West recommended)
 
 ### 5. Verify Deployment
 
-After deployment, check the logs:
+After deployment, check the Railway logs. The bot should show:
 
-**NVDA Bot should show:**
+**Successful Startup:**
 ```
+[TIMESTAMP] NVDA Bot Starting...
+[TIMESTAMP] Connection successful - Account: PA3OVLQ636WP
+[TIMESTAMP] Connection lock acquired
+[TIMESTAMP] No unexpected positions - ready to trade
 [TIMESTAMP] NVDA ORB Bot initialized
 [TIMESTAMP] Monitor Ticker: NVDA
 [TIMESTAMP] Long Ticker: NVDL (2x)
 [TIMESTAMP] Short Ticker: NVD (2x)
-[TIMESTAMP] Establishing 15-minute Opening Range...
+[TIMESTAMP] ORB tracking enabled - will track 9:30-9:45 AM range
 ```
 
-**MSOS Bot should show:**
+**Opening Range Established (9:45 AM ET):**
 ```
-[TIMESTAMP] Bot initialized
-[TIMESTAMP] Monitor Ticker: MSOS
-[TIMESTAMP] Trade Ticker: MSOX
-[TIMESTAMP] Fetching previous close...
-```
-
-### 6. Monitor the "Golden Gap"
-
-Watch the NVDA bot logs around 2:00 PM CST:
-
-```
-[2026-03-17 14:00:00 CST] CLOSING ALL POSITIONS - GOLDEN GAP EXIT at 2026-03-17 14:00:00 CST
-[2026-03-17 14:00:00 CST] ✓ Closed position: NVDL
-[2026-03-17 14:00:00 CST] ✓ All pending orders canceled
-[2026-03-17 14:00:01 CST] Golden Gap exit time reached. Bot stopping.
+[TIMESTAMP] ===== OPENING RANGE ESTABLISHED =====
+[TIMESTAMP] ORB High: $174.81
+[TIMESTAMP] ORB Low: $174.64
+[TIMESTAMP] Now monitoring 5-minute candles for breakouts...
 ```
 
-Then verify MSOS bot activates at 2:15 PM CST:
-
+**End of Day Exit (2:30 PM CST / 3:30 PM ET):**
 ```
-[2026-03-17 14:15:00 CT] Subscribed to MSOS live trade stream
-[2026-03-17 14:15:00 CT] Monitoring for signals...
+[2026-03-17 14:30:00 CDT] ======================================================================
+[2026-03-17 14:30:00 CDT] CLOSING ALL POSITIONS - END OF DAY EXIT at 2026-03-17 14:30:00 CDT
+[2026-03-17 14:30:00 CDT] ======================================================================
+[2026-03-17 14:30:00 CDT] Symbol: NVDL
+[2026-03-17 14:30:00 CDT] Final P&L: $422.54 (+2.11%)
+[2026-03-17 14:30:00 CDT] ✅ POSITION CLOSED - VERIFIED WITH ALPACA
 ```
 
 ## Troubleshooting
@@ -131,81 +107,89 @@ Then verify MSOS bot activates at 2:15 PM CST:
 ### Bot Doesn't Start
 
 **Check:**
-- Root directory is set correctly (`/nvda_bot` or `/msos_bot`)
+- Root directory is set correctly (`/nvda_bot`)
 - Start command is correct (`python nvda_strategy.py`)
-- Environment variables are set
+- Environment variables are set (ALPACA_API_KEY and ALPACA_SECRET_KEY)
 - `requirements.txt` exists in the root directory
+- Railway is using Python 3.11+
 
 ### "Module Not Found" Error
 
 Railway should auto-install from `requirements.txt`. If not:
-- Add a `Procfile` (though not typically needed):
-  ```
-  worker: pip install -r requirements.txt && python nvda_strategy.py
-  ```
+- Check that `railway.toml` exists with proper build configuration
+- Verify `requirements.txt` has all dependencies listed
+- Check Railway build logs for installation errors
 
-### Golden Gap Not Working
+### Connection Limit Exceeded Error
+
+**This is the most common issue. Solutions:**
+1. **Verify Railway replicas = 1** (not 2 or more)
+2. Check that no other bot/service is using the same Alpaca API keys
+3. Restart the Railway service to kill all instances
+4. The bot has exponential backoff built-in to handle transient issues
+
+### Position Not Closing at 2:30 PM CST
 
 **Verify:**
-- Bot timezone settings (CST = America/Chicago)
+- Bot timezone settings (CST = America/Chicago, ET = America/New_York)
 - System time on Railway (should be UTC, bot converts internally)
 - Check logs for exact exit timestamp
-
-### Position Not Closing Before MSOS Bot
-
-**Solutions:**
-1. Increase buffer: Change `GOLDEN_GAP_EXIT` to `time(13, 55)` (1:55 PM CST)
-2. Add manual check in MSOS bot to verify buying power before entry
-3. Monitor Alpaca account settlement times
+- Ensure `END_OF_DAY_EXIT = time(14, 30)` in code (2:30 PM CST)
 
 ## Best Practices
 
-1. **Paper Trading First**: Test both bots in paper mode for at least 1 week
-2. **Monitor Logs**: Check Railway logs daily for the first week
-3. **Capital Management**: Ensure $20k is available at 2:15 PM CST daily
-4. **Backup Alerts**: Set up alerts (email/SMS) for bot failures
+1. **Paper Trading First**: Test the bot in paper mode for at least 1 week
+2. **Monitor Logs**: Check Railway logs daily, especially during:
+   - 9:30 AM ET (market open)
+   - 9:45 AM ET (ORB establishment)
+   - 2:30 PM CST / 3:30 PM ET (end of day exit)
+3. **Daily Pre-Market Check**: Verify NO positions exist in Alpaca before 9:30 AM
+4. **Railway Replicas**: ALWAYS keep replicas = 1 (never increase)
 5. **Version Control**: Use Git tags for production deployments
+6. **Backup Plan**: Know how to manually close positions in Alpaca dashboard
 
 ## Cost Optimization
 
 **Railway Pricing (as of 2024):**
 - Free tier: $5 free credit/month
-- Pro plan: $20/month for both services
+- Pro plan: $20/month
 
 **To optimize:**
-- Both services can share one Railway project
-- Bots only run during market hours (saves compute time)
-- Consider scheduling (though Railway doesn't natively support cron, bots self-manage timing)
+- Bot self-manages timing (only active 9:30 AM - 3:30 PM ET)
+- Exits cleanly to avoid wasted compute time
+- Railway restarts periodically outside trading hours (normal behavior)
 
 ## Emergency Shutdown
 
-If you need to stop both bots immediately:
+If you need to stop the bot immediately:
 
 **Via Railway Dashboard:**
 1. Go to your project
-2. Click on each service
+2. Click on the nvda-bot service
 3. Click "Settings" → "Pause Service"
 
-**Via Alpaca API:**
-1. Log into Alpaca dashboard
+**Via Alpaca Dashboard:**
+1. Log into Alpaca dashboard (https://app.alpaca.markets/paper/dashboard/overview)
 2. Go to "Orders" → Cancel All
 3. Go to "Positions" → Close All
 
 ## Maintenance
 
 **Daily:**
-- Check logs for errors
-- Verify both bots started/stopped correctly
+- Check Railway logs for successful startup (before 9:30 AM ET)
+- Verify ORB was established at 9:45 AM ET
+- Confirm clean exit at 2:30 PM CST / 3:30 PM ET
+- Check Alpaca dashboard: NO positions should exist after 3:30 PM ET
 
 **Weekly:**
-- Review trade history in Alpaca
-- Check P&L by strategy
-- Verify Golden Gap timing logs
+- Review trade history in Alpaca dashboard
+- Analyze P&L and win rate
+- Check for any unexpected position warnings
 
 **Monthly:**
 - Update `alpaca-py` if new version available
-- Review strategy performance
-- Adjust position sizing if needed
+- Review strategy performance metrics
+- Consider parameter adjustments if needed (stop %, profit target, etc.)
 
 ## Support
 
@@ -216,10 +200,15 @@ For issues:
 
 ## Next Steps
 
-1. Test in paper trading for 1 week
-2. Monitor Golden Gap exits daily
-3. Verify capital availability for MSOS bot
-4. After successful testing, switch to live trading:
-   - Change `paper=True` to `paper=False` in both bots
-   - Redeploy to Railway
-   - Monitor closely for first 3 days
+1. **Test in paper trading for 1-2 weeks**
+2. **Monitor daily exits at 2:30 PM CST / 3:30 PM ET**
+3. **Verify no unexpected positions appear**
+4. **After successful testing, switch to live trading:**
+   - Change `paper=True` to `paper=False` in `nvda_strategy.py`
+   - Commit and push to GitHub
+   - Railway will auto-deploy
+   - Monitor VERY closely for first 3 trading days
+5. **Set up daily monitoring routine:**
+   - 9:25 AM ET: Check Railway logs for bot startup
+   - 9:45 AM ET: Verify ORB established
+   - 3:35 PM ET: Confirm clean exit and no open positions

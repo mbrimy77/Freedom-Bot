@@ -18,7 +18,7 @@
   3. NVD trades (short position monitoring)
 
 ### Improved
-- Architecture now consistent with MSOS bot (both use live trades)
+- Real-time architecture for instant price updates
 - Faster profit target detection (real-time vs 1-2 second polling)
 - Better visibility with periodic P&L updates
 - More accurate stop loss awareness
@@ -28,7 +28,7 @@
 - Added `should_log_periodic_update()` method for 30-second logging
 - Modified `check_profit_target()` to accept current price parameter
 - Removed position polling from `handle_nvda_bar()` loop
-- Golden Gap exit now also handled in trade handlers
+- End of day exit now also handled in trade handlers
 
 ## [1.0.0] - 2026-03-17
 
@@ -36,11 +36,11 @@
 - 15-minute Opening Range Breakout strategy
 - NVDA monitoring for entry signals
 - NVDL (2x Long) and NVD (2x Short) trading
-- Position sizing for $300 max loss with 2x leverage
-- Dual-stage exit system:
+- Position sizing: $20,000 fixed position with 2x leverage
+- Three-stage exit system:
   - Stage 1: 1.5% hard stop loss
   - Stage 2: 3% profit → 1% trailing stop upgrade
-  - Stage 3: Golden Gap exit at 2:00 PM CST
+  - Stage 3: End of day exit at 2:30 PM CST (3:30 PM ET)
 - Max 1 trade per day
 - Comprehensive logging and error handling
 - Paper trading enabled by default

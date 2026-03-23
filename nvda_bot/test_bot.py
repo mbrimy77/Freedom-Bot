@@ -236,7 +236,7 @@ class BotTester:
             print(f"  Current ET Time: {now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}")
             print(f"  Current CST Time: {now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}")
             print(f"  Market Open (ET): 9:30 AM")
-            print(f"  Golden Gap Exit (CST): 2:00 PM")
+            print(f"  End of Day Exit (CST): 2:30 PM / (ET): 3:30 PM")
             
             # Check if times make sense
             time_diff = (now_et - now_cst).total_seconds() / 3600

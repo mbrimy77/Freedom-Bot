@@ -1256,9 +1256,8 @@ class NVDAOpeningRangeBot:
 
 
 async def main():
-    # CRITICAL: Check time BEFORE creating bot to avoid websocket connection race condition
-    # When Railway deploys both bots simultaneously, they both try to connect at once
-    # This check prevents NVDA from even attempting connection during MSOS time window
+    # CRITICAL: Check time BEFORE creating bot to avoid unnecessary connections
+    # Exit early if outside trading hours to save resources
     now_et = datetime.now(TIMEZONE_ET)
     now_cst = datetime.now(TIMEZONE_CST)
     current_time_et = now_et.time()

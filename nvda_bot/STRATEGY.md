@@ -24,7 +24,7 @@ Low: $871.20
 ORB Range: $4.30
 ```
 
-### 2. Breakout Detection (9:45 AM - 2:00 PM CST)
+### 2. Breakout Detection (9:45 AM - 3:30 PM ET)
 
 After the ORB is established, we monitor NVDA 5-minute candles for breakouts:
 
@@ -129,15 +129,15 @@ Price drops to $44.60
 → Position closed at $44.55 for profit
 ```
 
-#### Stage 3: Golden Gap Exit (2:00 PM CST - MANDATORY)
+#### Stage 3: End of Day Exit (2:30 PM CST / 3:30 PM ET - MANDATORY)
 
-At exactly 2:00 PM Central Time, all positions are closed regardless of profit or loss.
+At exactly 2:30 PM Central Time (3:30 PM Eastern Time), all positions are closed regardless of profit or loss.
 
-**Why 2:00 PM CST?**
-- Creates 15-minute buffer before MSOS bot starts at 2:15 PM
-- Ensures capital is settled and available
-- Prevents overlap between two strategies
-- Guarantees $20k is liquid for afternoon momentum play
+**Why 2:30 PM CST / 3:30 PM ET?**
+- Creates 30-minute buffer before market close at 4:00 PM ET
+- Avoids end-of-day volatility and unpredictable closing auction
+- Ensures clean daily reset with no overnight positions
+- Eliminates gap risk and after-hours exposure
 
 **Exit Process:**
 1. Close all positions at market
@@ -152,9 +152,9 @@ At exactly 2:00 PM Central Time, all positions are closed regardless of profit o
 - Position sizing automatically adjusts for volatility
 - Stop loss protects against false breakouts
 
-**What if breakout happens right at 2:00 PM?**
-- No entry - Golden Gap exit takes priority
-- Last entry should be around 1:55 PM to allow for management
+**What if breakout happens right at 2:25 PM CST (3:25 PM ET)?**
+- No entry - End of day exit takes priority
+- Last safe entry should be before 2:00 PM CST to allow proper management
 
 **What if both long and short triggers hit?**
 - Only first trigger is taken (first breakout above or below)
@@ -164,18 +164,18 @@ At exactly 2:00 PM Central Time, all positions are closed regardless of profit o
 - No re-entry - max 1 trade per day
 - Prevents revenge trading and overtrading
 
-**What if position is at 2.9% profit at 2:00 PM?**
-- Close it anyway - Golden Gap is non-negotiable
-- Better to take $580 profit and ensure capital for MSOS
-- System integrity > individual trade optimization
+**What if position is at 2.9% profit at 2:30 PM CST?**
+- Close it anyway - End of day exit is non-negotiable
+- Better to take $580 profit than risk holding through volatile closing period
+- System discipline > individual trade optimization
 
 ## Psychological Advantages
 
 1. **No Discretion**: Rules are mechanical, reduces emotional decisions
-2. **Defined Risk**: $300 max loss is known before entry
-3. **Time-Bound**: Strategy ends at 2:00 PM, no overnight stress
-4. **Profit Protection**: Trailing stop locks in gains
-5. **No FOMO**: Max 1 trade prevents chasing
+2. **Defined Risk**: Maximum loss is known before entry (1.5% stop)
+3. **Time-Bound**: Strategy ends at 2:30 PM CST / 3:30 PM ET, no overnight stress
+4. **Profit Protection**: Trailing stop locks in gains after 3% profit
+5. **No FOMO**: Max 1 trade per day prevents chasing and overtrading
 
 ## Backtesting Considerations
 
@@ -223,22 +223,24 @@ When backtesting this strategy:
 4. **Volatility Filter**: Skip days when VIX < 15
 5. **Time Filter**: Only trade first breakout before 11:00 AM
 
-## Integration with MSOS Bot
+## Daily Trading Window
 
-The Golden Gap exit at 2:00 PM CST ensures:
+The bot operates within a strict 6-hour window:
 
-- NVDA position is closed and settled
-- Buying power is updated by 2:15 PM
-- MSOS bot has full $20k for momentum trade
-- No capital conflicts or margin issues
-
-**Daily Capital Flow:**
+**Daily Schedule:**
 ```
-9:30 AM: $20k available → NVDA ORB trade
-2:00 PM: NVDA closed → Capital settling
-2:15 PM: $20k available → MSOS momentum trade
-2:58 PM: MSOS closed → Overnight cash position
+9:30 AM ET: Market opens - Begin tracking opening range
+9:45 AM ET: ORB established - Monitor for breakout signals
+9:45 AM - 3:30 PM ET: Active trading window (6 hours)
+2:30 PM CST / 3:30 PM ET: Mandatory exit - Close all positions
+3:30 PM - 9:30 AM ET: Bot idle - No positions held overnight
 ```
+
+**Benefits of the 3:30 PM ET Exit:**
+- Captures morning volatility (most profitable period)
+- Avoids unpredictable 3:30-4:00 PM closing volatility
+- No overnight gap risk or after-hours exposure
+- Clean daily P&L with clear start/end times
 
 ## Risk of Ruin
 
@@ -253,10 +255,10 @@ With $300 max loss per trade and $20k account:
 ## Summary
 
 The NVDA ORB strategy combines:
-- **Systematic entry**: Clear rules, no discretion
-- **Defined risk**: $300 max loss per trade
-- **Profit optimization**: Trailing stop after 3% gain
-- **Capital protection**: Golden Gap ensures liquidity
-- **Time discipline**: Strategy ends at 2:00 PM sharp
+- **Systematic entry**: Clear rules based on opening range breakouts, no discretion
+- **Defined risk**: 1.5% stop loss on every trade
+- **Profit optimization**: Trailing stop upgrade after 3% profit target
+- **Capital protection**: No overnight positions, exits 30 minutes before market close
+- **Time discipline**: Strategy ends at 2:30 PM CST / 3:30 PM ET sharp
 
-This is a high-probability, mechanical strategy that thrives on NVDA's opening volatility while maintaining strict risk controls and integrating seamlessly with the afternoon MSOS strategy.
+This is a mechanical, rule-based strategy that captures NVDA's opening volatility while maintaining strict risk controls and time discipline. The 6-hour trading window focuses on the most volatile and profitable period of the day.
