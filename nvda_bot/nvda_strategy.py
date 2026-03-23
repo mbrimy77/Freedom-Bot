@@ -652,18 +652,17 @@ class NVDAOpeningRangeBot:
             
             # Check if profit target hit
             if unrealized_pl >= (ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100):
-                print(f"\n[{self._get_timestamp_et()}] PROFIT TARGET HIT! ${unrealized_pl:.2f} >= ${ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100:.2f}")
-                print(f"[{self._get_timestamp_et()}] Upgrading to {TRAILING_STOP_PCT}% Trailing Stop...")
+                log_and_flush(f"\n{'='*70}")
+                log_and_flush(f"🎯 PROFIT TARGET HIT - UPGRADING TO TRAILING STOP 🎯")
+                log_and_flush(f"{'='*70}")
+                log_and_flush(f"Current P&L: ${unrealized_pl:.2f} (Target: ${ACCOUNT_SIZE * PROFIT_TARGET_PCT / 100:.2f})")
+                log_and_flush(f"Current Price: ${current_price:.2f}")
+                log_and_flush(f"Upgrading to {TRAILING_STOP_PCT}% Trailing Stop...")
+                log_and_flush(f"")
                 
-                # Cancel existing stop loss
-                if self.stop_loss_order_id:
-                    try:
-                        self.trading_client.cancel_order_by_id(self.stop_loss_order_id)
-                        print(f"[{self._get_timestamp_et()}] Hard stop canceled")
-                    except Exception as e:
-                        print(f"[{self._get_timestamp_et()}] ERROR canceling stop: {e}")
-                
-                # Place trailing stop order
+                # CRITICAL: Place trailing stop BEFORE canceling hard stop
+                # This ensures we ALWAYS have stop protection (no gap)
+                trailing_order = None
                 try:
                     trailing_stop_request = TrailingStopOrderRequest(
                         symbol=self.entry_ticker,
@@ -674,13 +673,34 @@ class NVDAOpeningRangeBot:
                     )
                     
                     trailing_order = self.trading_client.submit_order(trailing_stop_request)
-                    self.stop_loss_order_id = trailing_order.id
-                    self.profit_target_hit = True
-                    
-                    print(f"[{self._get_timestamp_et()}] Trailing Stop activated - Order ID: {trailing_order.id}")
+                    log_and_flush(f"✅ Trailing Stop order placed - Order ID: {trailing_order.id}")
+                    await asyncio.sleep(0.5)  # Brief pause to ensure order is active
                     
                 except Exception as e:
-                    print(f"[{self._get_timestamp_et()}] ERROR placing trailing stop: {e}")
+                    log_and_flush(f"❌ ERROR placing trailing stop: {e}")
+                    log_and_flush(f"⚠️  KEEPING HARD STOP ACTIVE - Did not cancel for safety")
+                    log_and_flush(f"{'='*70}\n")
+                    return  # Keep hard stop if trailing stop fails
+                
+                # NOW cancel hard stop (only after trailing stop is active)
+                if self.stop_loss_order_id and trailing_order:
+                    try:
+                        self.trading_client.cancel_order_by_id(self.stop_loss_order_id)
+                        log_and_flush(f"✅ Hard stop canceled (replaced by trailing stop)")
+                        self.stop_loss_order_id = trailing_order.id
+                        self.profit_target_hit = True
+                    except Exception as e:
+                        log_and_flush(f"⚠️  WARNING: Error canceling hard stop: {e}")
+                        log_and_flush(f"   Both stops may be active temporarily")
+                        log_and_flush(f"   Trailing stop will manage position going forward")
+                        self.stop_loss_order_id = trailing_order.id
+                        self.profit_target_hit = True
+                
+                log_and_flush(f"")
+                log_and_flush(f"✅ UPGRADE COMPLETE")
+                log_and_flush(f"   Protection: {TRAILING_STOP_PCT}% Trailing Stop now active")
+                log_and_flush(f"   Stop will move up as price increases")
+                log_and_flush(f"{'='*70}\n")
         
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR checking profit target: {e}")
@@ -719,34 +739,90 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"Market Value: ${market_value:.2f}")
                     log_and_flush(f"Final P&L: ${final_pl:.2f} ({final_pl_pct:+.2f}%)")
                     log_and_flush(f"")
-                    log_and_flush(f"Closing position...")
                     
-                    # Close the position
+                    # STEP 1: Check for active stop orders BEFORE closing
+                    stop_orders_found = []
+                    try:
+                        all_orders = self.trading_client.get_orders()
+                        for order in all_orders:
+                            if order.symbol == position.symbol and order.type in ['stop', 'trailing_stop']:
+                                stop_orders_found.append({
+                                    'id': order.id,
+                                    'type': order.type,
+                                    'stop_price': getattr(order, 'stop_price', None),
+                                    'trail_percent': getattr(order, 'trail_percent', None)
+                                })
+                        
+                        if stop_orders_found:
+                            log_and_flush(f"Active stop order(s) found:")
+                            for stop in stop_orders_found:
+                                log_and_flush(f"   - Type: {stop['type']}, ID: {stop['id']}")
+                    except Exception as e:
+                        log_and_flush(f"⚠️  Could not check for stop orders: {e}")
+                    
+                    # STEP 2: Close the position (Alpaca should cancel stops automatically)
+                    log_and_flush(f"")
+                    log_and_flush(f"Closing position...")
                     self.trading_client.close_position(position.symbol)
                     log_and_flush(f"✅ Close order submitted to Alpaca")
+                    log_and_flush(f"   (Alpaca will auto-cancel associated stop orders)")
                     
-                    # Wait for close to process
+                    # STEP 3: Wait for close to process
                     await asyncio.sleep(2)
                     
-                    # Verify position is closed
+                    # STEP 4: Verify position is closed
                     try:
                         check_position = self.trading_client.get_open_position(position.symbol)
+                        log_and_flush(f"")
                         log_and_flush(f"⚠️  WARNING: Position still exists after close attempt!")
                         log_and_flush(f"   Current qty: {float(check_position.qty)}")
+                        log_and_flush(f"   Check Alpaca dashboard immediately!")
                     except Exception:
                         # Position doesn't exist = successfully closed
+                        log_and_flush(f"")
                         log_and_flush(f"✅ POSITION CLOSED - VERIFIED WITH ALPACA")
                         log_and_flush(f"   {position.symbol} position no longer exists in account")
+                    
+                    # STEP 5: Verify stop orders were canceled
+                    if stop_orders_found:
+                        log_and_flush(f"")
+                        log_and_flush(f"Verifying stop order(s) were canceled...")
+                        await asyncio.sleep(1)
+                        
+                        try:
+                            remaining_orders = self.trading_client.get_orders()
+                            stops_still_active = []
+                            
+                            for stop in stop_orders_found:
+                                for order in remaining_orders:
+                                    if order.id == stop['id']:
+                                        stops_still_active.append(stop['id'])
+                            
+                            if stops_still_active:
+                                log_and_flush(f"⚠️  WARNING: {len(stops_still_active)} stop order(s) still active!")
+                                log_and_flush(f"   Manually canceling...")
+                                for order_id in stops_still_active:
+                                    try:
+                                        self.trading_client.cancel_order_by_id(order_id)
+                                        log_and_flush(f"   ✅ Canceled stop order: {order_id}")
+                                    except Exception as e:
+                                        log_and_flush(f"   ❌ Could not cancel {order_id}: {e}")
+                            else:
+                                log_and_flush(f"✅ All stop orders automatically canceled by Alpaca")
+                        except Exception as e:
+                            log_and_flush(f"⚠️  Could not verify stop cancellation: {e}")
             
-            # Cancel any pending orders
+            # STEP 6: Final check - cancel any remaining pending orders
             try:
-                orders = self.trading_client.get_orders()
-                if orders:
-                    log_and_flush(f"\nCanceling {len(orders)} pending order(s)...")
+                remaining_orders = self.trading_client.get_orders()
+                if remaining_orders:
+                    log_and_flush(f"")
+                    log_and_flush(f"⚠️  Found {len(remaining_orders)} remaining order(s) - canceling...")
                     self.trading_client.cancel_orders()
-                    log_and_flush(f"✅ All pending orders canceled")
+                    log_and_flush(f"✅ All remaining orders canceled")
                 else:
-                    log_and_flush(f"\n✅ No pending orders to cancel")
+                    log_and_flush(f"")
+                    log_and_flush(f"✅ No pending orders remaining")
             except Exception as e:
                 log_and_flush(f"⚠️  WARNING: Error checking pending orders: {e}")
             
