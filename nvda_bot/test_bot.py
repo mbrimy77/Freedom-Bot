@@ -238,13 +238,20 @@ class BotTester:
             print(f"  Market Open (ET): 9:30 AM")
             print(f"  End of Day Exit (CST): 2:30 PM / (ET): 3:30 PM")
             
-            # Check if times make sense
-            time_diff = (now_et - now_cst).total_seconds() / 3600
-            if abs(time_diff - 1.0) < 0.1:  # Should be ~1 hour difference
-                print(f"  SUCCESS: Timezone configuration correct")
+            # Compare timezone offsets, not the datetime values themselves.
+            # ET and Chicago time represent the same instant, so subtraction is ~0.
+            et_offset_hours = now_et.utcoffset().total_seconds() / 3600
+            cst_offset_hours = now_cst.utcoffset().total_seconds() / 3600
+            offset_diff = et_offset_hours - cst_offset_hours
+
+            print(f"  ET Offset: UTC{et_offset_hours:+.0f}")
+            print(f"  Chicago Offset: UTC{cst_offset_hours:+.0f}")
+
+            if abs(offset_diff - 1.0) < 0.1:  # ET should be 1 hour ahead of Minnesota/Chicago time
+                print(f"  SUCCESS: Timezone configuration correct for Minnesota (America/Chicago)")
                 return True
             else:
-                print(f"  WARNING: Timezone difference seems wrong: {time_diff:.1f} hours")
+                print(f"  WARNING: Timezone offset difference seems wrong: {offset_diff:.1f} hours")
                 return False
         except Exception as e:
             print(f"  FAILED: {e}")
