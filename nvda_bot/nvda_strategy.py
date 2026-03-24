@@ -49,6 +49,8 @@ ORB_START = time(9, 30)        # 9:30 AM ET (ORB start)
 ORB_END = time(9, 45)          # 9:45 AM ET (ORB end)
 TRADING_START = time(9, 45)    # 9:45 AM ET (start monitoring for breakouts)
 END_OF_DAY_EXIT = time(14, 30)  # 2:30 PM CST / 3:30 PM ET (end of trading day)
+PREMARKET_WAKE_ET = time(9, 25)  # Wake a few minutes before the opening bell
+END_OF_DAY_EXIT_ET = time(15, 30)  # 3:30 PM ET
 
 TIMEZONE_ET = pytz.timezone('America/New_York')
 TIMEZONE_CST = pytz.timezone('America/Chicago')
@@ -61,6 +63,51 @@ CONNECTION_LOCK_FILE = "/tmp/nvda_bot_connection.lock"
 def log_and_flush(message):
     """Print and immediately flush to ensure logs appear in Railway"""
     print(message, flush=True)
+
+
+def get_next_session_start_et(now_et):
+    """
+    Return the next ET datetime when the bot should wake up and prepare to trade.
+    Returns None when we are already inside the active startup/trading window.
+    """
+    target_date = now_et.date()
+
+    if now_et.weekday() >= 5:
+        days_until_monday = (7 - now_et.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 1
+        target_date += timedelta(days=days_until_monday)
+    elif now_et.time() >= END_OF_DAY_EXIT_ET:
+        target_date += timedelta(days=1)
+    elif now_et.time() < PREMARKET_WAKE_ET:
+        pass
+    else:
+        return None
+
+    while target_date.weekday() >= 5:
+        target_date += timedelta(days=1)
+
+    return TIMEZONE_ET.localize(datetime.combine(target_date, PREMARKET_WAKE_ET))
+
+
+async def wait_until_session_start():
+    """
+    Keep the worker alive outside trading hours instead of exiting and hoping
+    the platform restarts us later.
+    """
+    while True:
+        now_et = datetime.now(TIMEZONE_ET)
+        next_start = get_next_session_start_et(now_et)
+
+        if next_start is None:
+            return
+
+        wait_seconds = max(1, int((next_start - now_et).total_seconds()))
+        log_and_flush(
+            f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Outside trading window. "
+            f"Sleeping until {next_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+        )
+        await asyncio.sleep(wait_seconds)
 
 
 async def handle_connection_limit_backoff():
@@ -269,7 +316,7 @@ class NVDAOpeningRangeBot:
         return False
     
     async def wait_for_market_open(self):
-        """Check if market is open, exit if not (Railway will restart)"""
+        """Wait until market open instead of exiting the worker."""
         now_et = datetime.now(TIMEZONE_ET)
         
         # Check if weekend
@@ -282,9 +329,10 @@ class NVDAOpeningRangeBot:
             
             print(f"[{self._get_timestamp_et()}] Market closed (weekend)")
             print(f"[{self._get_timestamp_et()}] Next open: Monday {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-            print(f"[{self._get_timestamp_et()}] Exiting - Railway will restart closer to market open")
-            await asyncio.sleep(30)
-            return False
+            print(f"[{self._get_timestamp_et()}] Waiting for next market open...")
+            await asyncio.sleep((next_open - now_et).total_seconds())
+            print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
+            return True
         
         # Check if before market open today
         market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
@@ -293,18 +341,11 @@ class NVDAOpeningRangeBot:
             wait_seconds = (market_open_time - now_et).total_seconds()
             print(f"[{self._get_timestamp_et()}] Market opens at 9:30 AM ET")
             print(f"[{self._get_timestamp_et()}] {wait_seconds:.0f} seconds until open")
-            
-            # If more than 5 minutes away, exit and let Railway restart
-            if wait_seconds > 300:
-                print(f"[{self._get_timestamp_et()}] Exiting - Railway will restart closer to market open")
-                await asyncio.sleep(30)
-                return False
-            else:
-                # Less than 5 minutes - wait for it
-                print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for market open...")
-                await asyncio.sleep(wait_seconds)
-                print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
-                return True
+
+            print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for market open...")
+            await asyncio.sleep(wait_seconds)
+            print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
+            return True
         
         # Market is open!
         print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
@@ -451,7 +492,7 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"     - If it's an error: Close manually in Alpaca dashboard")
                     log_and_flush(f"     - If it's intentional: Let it run (bot will not enter new trades today)")
                     log_and_flush(f"  3. Check yesterday's logs to understand what happened")
-                    log_and_flush(f"  4. Once resolved, Railway will restart bot automatically")
+                    log_and_flush(f"  4. Once resolved, the bot will retry automatically")
                     log_and_flush(f"")
                     log_and_flush(f"BOT WILL EXIT IN 60 SECONDS TO ALLOW MANUAL REVIEW")
                     log_and_flush(f"{'='*70}\n")
@@ -1229,7 +1270,7 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"[{self._get_timestamp_et()}]   2. Check Settings > Replicas = 1 (NOT more)")
                 log_and_flush(f"[{self._get_timestamp_et()}]   3. Restart the service to kill all instances")
                 log_and_flush(f"[{self._get_timestamp_et()}] ")
-                log_and_flush(f"[{self._get_timestamp_et()}] Exiting - Railway will restart in 30 seconds")
+                log_and_flush(f"[{self._get_timestamp_et()}] Exiting current run - bot will retry in 30 seconds")
                 release_connection_lock()
                 await asyncio.sleep(30)
                 return
@@ -1256,42 +1297,34 @@ class NVDAOpeningRangeBot:
 
 
 async def main():
-    # CRITICAL: Check time BEFORE creating bot to avoid unnecessary connections
-    # Exit early if outside trading hours to save resources
-    now_et = datetime.now(TIMEZONE_ET)
-    now_cst = datetime.now(TIMEZONE_CST)
-    current_time_et = now_et.time()
-    current_time_cst = now_cst.time()
-    
-    log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] NVDA Bot Starting...")
-    log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time ET: {current_time_et}")
-    log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time CST: {current_time_cst}")
-    
-    # NVDA bot should NOT run after end of day exit time (2:30 PM CST / 3:30 PM ET)
-    if current_time_cst >= END_OF_DAY_EXIT:
-        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Trading window closed (after 2:30 PM CST)")
-        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Next run: Tomorrow at 9:15 AM ET")
-        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Railway will restart tomorrow")
-        await asyncio.sleep(60)
-        return
-    
-    # NVDA bot should NOT run after market close (4:00 PM ET)
-    if current_time_et >= time(16, 0):
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Market closed for today")
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Next run: Tomorrow at 9:15 AM ET")
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Railway will restart tomorrow")
-        await asyncio.sleep(60)
-        return
-    
-    # Check if we missed the ORB window (after 9:45 AM ET)
-    if current_time_et > time(9, 45):
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] WARNING: Starting after ORB period (9:30-9:45 AM ET)")
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Bot will check for existing positions but won't enter new trades")
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Reason: Cannot establish Opening Range after 9:45 AM")
-    
-    # Time check passed - safe to create bot and connect
-    bot = NVDAOpeningRangeBot()
-    await bot.run()
+    while True:
+        # Stay alive overnight/weekends instead of exiting cleanly.
+        await wait_until_session_start()
+
+        now_et = datetime.now(TIMEZONE_ET)
+        now_cst = datetime.now(TIMEZONE_CST)
+        current_time_et = now_et.time()
+        current_time_cst = now_cst.time()
+
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] NVDA Bot Starting...")
+        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time ET: {current_time_et}")
+        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time CST: {current_time_cst}")
+
+        # Check if we missed the ORB window (after 9:45 AM ET)
+        if current_time_et > time(9, 45):
+            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] WARNING: Starting after ORB period (9:30-9:45 AM ET)")
+            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Bot will check for existing positions but won't enter new trades")
+            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Reason: Cannot establish Opening Range after 9:45 AM")
+
+        bot = NVDAOpeningRangeBot()
+        await bot.run()
+
+        # If we exited unexpectedly during active hours, pause briefly before retrying.
+        now_et = datetime.now(TIMEZONE_ET)
+        now_cst = datetime.now(TIMEZONE_CST)
+        if now_et.weekday() < 5 and now_et.time() < END_OF_DAY_EXIT_ET and now_cst.time() < END_OF_DAY_EXIT:
+            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Bot run exited during active hours. Retrying in 60 seconds.")
+            await asyncio.sleep(60)
 
 
 if __name__ == "__main__":

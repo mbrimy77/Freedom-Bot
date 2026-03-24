@@ -157,7 +157,7 @@ Railway should auto-install from `requirements.txt`. If not:
 **To optimize:**
 - Bot self-manages timing (only active 9:30 AM - 3:30 PM ET)
 - Exits cleanly to avoid wasted compute time
-- Railway restarts periodically outside trading hours (normal behavior)
+- Bot stays alive outside trading hours and sleeps until the next session
 
 ## Emergency Shutdown
 
