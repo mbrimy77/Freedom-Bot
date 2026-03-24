@@ -65,6 +65,20 @@ def log_and_flush(message):
     print(message, flush=True)
 
 
+def is_missing_position_error(error):
+    """
+    Alpaca raises when a position is not found. Distinguish that case from
+    transient API/network issues so we don't falsely assume a live position
+    has already been closed.
+    """
+    message = str(error).lower()
+    return (
+        "position does not exist" in message
+        or "position not found" in message
+        or "404" in message
+    )
+
+
 def get_next_session_start_et(now_et):
     """
     Return the next ET datetime when the bot should wake up and prepare to trade.
@@ -514,10 +528,22 @@ class NVDAOpeningRangeBot:
             if ticker in latest_quote:
                 ask_price = float(latest_quote[ticker].ask_price)
                 bid_price = float(latest_quote[ticker].bid_price)
-                mid_price = (ask_price + bid_price) / 2
-                
-                print(f"[{self._get_timestamp_et()}] {ticker} Latest Quote - Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}, Mid: ${mid_price:.2f}")
-                return mid_price
+
+                if bid_price > 0 and ask_price > 0:
+                    reference_price = (ask_price + bid_price) / 2
+                elif ask_price > 0:
+                    reference_price = ask_price
+                elif bid_price > 0:
+                    reference_price = bid_price
+                else:
+                    print(f"[{self._get_timestamp_et()}] ERROR: Invalid quote for {ticker} (bid/ask are zero)")
+                    return None
+
+                print(
+                    f"[{self._get_timestamp_et()}] {ticker} Latest Quote - "
+                    f"Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}, Ref: ${reference_price:.2f}"
+                )
+                return reference_price
             else:
                 print(f"[{self._get_timestamp_et()}] ERROR: No quote data for {ticker}")
                 return None
@@ -1024,7 +1050,11 @@ class NVDAOpeningRangeBot:
                     self.position_side = None
                     return
             except Exception as e:
-                # Exception means position doesn't exist
+                if not is_missing_position_error(e):
+                    log_and_flush(f"[{self._get_timestamp_et()}] WARNING checking {LONG_TICKER} position: {e}")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Keeping position state intact and retrying on next trade update")
+                    return
+
                 log_and_flush(f"\n{'='*70}")
                 log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
                 log_and_flush(f"{'='*70}")
@@ -1036,7 +1066,7 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"   Check dashboard for exact exit details:")
                 log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
                 log_and_flush(f"{'='*70}\n")
-                
+
                 self.position_entered = False
                 self.position_side = None
                 return
@@ -1103,7 +1133,11 @@ class NVDAOpeningRangeBot:
                     self.position_side = None
                     return
             except Exception as e:
-                # Exception means position doesn't exist
+                if not is_missing_position_error(e):
+                    log_and_flush(f"[{self._get_timestamp_et()}] WARNING checking {SHORT_TICKER} position: {e}")
+                    log_and_flush(f"[{self._get_timestamp_et()}] Keeping position state intact and retrying on next trade update")
+                    return
+
                 log_and_flush(f"\n{'='*70}")
                 log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
                 log_and_flush(f"{'='*70}")
@@ -1115,7 +1149,7 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"   Check dashboard for exact exit details:")
                 log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
                 log_and_flush(f"{'='*70}\n")
-                
+
                 self.position_entered = False
                 self.position_side = None
                 return
