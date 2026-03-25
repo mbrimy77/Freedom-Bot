@@ -428,30 +428,72 @@ class NVDAOpeningRangeBot:
     
     def calculate_position_size(self, entry_price):
         """
-        Calculate shares for $20K position size
-        - Target position: $20,000
-        - ETF is 2x leveraged
-        
-        Formula: shares = $20,000 / entry_price
+        Calculate shares for a fixed $20K ETF position size.
+
+        Since we trade the ETF directly, the ETF price already reflects its
+        leverage. Expected loss is therefore based on the ETF stop distance
+        without applying another 2x multiplier in the log output.
         """
-        leverage = 2.0
-        
-        # Calculate shares for $20K position
         shares = int(ACCOUNT_SIZE / entry_price)
-        
         notional_value = shares * entry_price
-        # With 1.5% stop on 2x leveraged ETF, actual dollar risk will be:
-        # shares × entry_price × 1.5% × 2 = total risk
-        max_loss = shares * entry_price * (HARD_STOP_PCT / 100) * leverage
+        max_loss = shares * entry_price * (HARD_STOP_PCT / 100)
         max_loss_pct = (max_loss / ACCOUNT_SIZE) * 100
-        
-        print(f"[{self._get_timestamp_et()}] Position Sizing:")
-        print(f"[{self._get_timestamp_et()}]   Entry Price: ${entry_price:.2f}")
-        print(f"[{self._get_timestamp_et()}]   Shares: {shares}")
-        print(f"[{self._get_timestamp_et()}]   Notional Value: ${notional_value:.2f}")
-        print(f"[{self._get_timestamp_et()}]   Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of position)")
-        
-        return shares
+
+        return shares, notional_value, max_loss, max_loss_pct
+
+    def get_exit_label(self, order_type_value=None):
+        """Describe whether the exit came from a hard stop or trailing stop."""
+        if order_type_value and "trailing" in order_type_value:
+            return "TRAILING STOP HIT"
+        if self.profit_target_hit:
+            return "TRAILING STOP HIT"
+        return "STOP LOSS HIT"
+
+    def log_exit_fill_details(self, symbol: str):
+        """
+        Log the actual Alpaca exit fill price and realized P&L when a stop
+        order closes the position.
+        """
+        if not self.stop_loss_order_id:
+            return False
+
+        try:
+            exit_order = self.trading_client.get_order_by_id(self.stop_loss_order_id)
+            filled_avg_price = getattr(exit_order, 'filled_avg_price', None)
+            filled_qty = getattr(exit_order, 'filled_qty', None)
+            order_type = getattr(exit_order, 'order_type', None)
+            order_type_value = order_type.value if hasattr(order_type, 'value') else str(order_type)
+
+            if filled_avg_price is None or filled_qty is None or float(filled_qty) == 0:
+                return False
+
+            exit_price = float(filled_avg_price)
+            exit_qty = float(filled_qty)
+            exit_label = self.get_exit_label(order_type_value)
+
+            log_and_flush(f"\n{'='*70}")
+            log_and_flush(f"{exit_label} - FILLED WITH ALPACA")
+            log_and_flush(f"{'='*70}")
+            log_and_flush(f"Symbol: {symbol}")
+            log_and_flush(f"Order ID: {exit_order.id}")
+            log_and_flush(f"Order Type: {order_type_value}")
+            log_and_flush(f"Shares Filled: {int(exit_qty)}")
+            log_and_flush(f"Exit Price: ${exit_price:.6f}")
+
+            if self.entry_price is not None:
+                price_change = exit_price - self.entry_price
+                realized_pl = price_change * exit_qty
+                realized_pl_pct = (price_change / self.entry_price) * 100
+                log_and_flush(f"Entry Price: ${self.entry_price:.2f}")
+                log_and_flush(f"Realized P&L: ${realized_pl:.2f} ({realized_pl_pct:+.2f}%)")
+
+            log_and_flush(f"CLOSURE VERIFIED WITH ALPACA")
+            log_and_flush(f"   {symbol} position no longer exists in account")
+            log_and_flush(f"{'='*70}\n")
+            return True
+        except Exception as e:
+            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Could not fetch Alpaca exit fill details: {e}")
+            return False
     
     def check_existing_position(self):
         """Check if a position already exists for NVDL or NVD"""
@@ -554,9 +596,6 @@ class NVDAOpeningRangeBot:
     async def place_trade_with_stop(self, ticker: str, side: OrderSide, nvda_signal_price: float):
         """Place trade with bracket order (entry + stop loss)"""
         try:
-            print(f"\n[{self._get_timestamp_et()}] {'LONG' if side == OrderSide.BUY else 'SHORT'} SIGNAL DETECTED")
-            print(f"[{self._get_timestamp_et()}] NVDA Signal Price: ${nvda_signal_price:.2f}")
-            
             # Get the actual current price of the ETF we're trading
             etf_price = await self.get_latest_price(ticker)
             if etf_price is None:
@@ -564,7 +603,7 @@ class NVDAOpeningRangeBot:
                 return False
             
             # Calculate position size based on ETF price (not NVDA price!)
-            shares = self.calculate_position_size(etf_price)
+            shares, notional_value, max_loss, max_loss_pct = self.calculate_position_size(etf_price)
             
             if shares <= 0:
                 print(f"[{self._get_timestamp_et()}] ERROR: Invalid position size ({shares} shares)")
@@ -576,12 +615,17 @@ class NVDAOpeningRangeBot:
                 stop_price = round(etf_price * (1 - HARD_STOP_PCT / 100), 2)
             else:
                 stop_price = round(etf_price * (1 + HARD_STOP_PCT / 100), 2)
-            
-            print(f"\n[{self._get_timestamp_et()}] PLACING {'LONG' if side == OrderSide.BUY else 'SHORT'} ORDER")
-            print(f"[{self._get_timestamp_et()}] Ticker: {ticker}")
-            print(f"[{self._get_timestamp_et()}] Shares: {shares}")
-            print(f"[{self._get_timestamp_et()}] Expected Entry: ${etf_price:.2f}")
-            print(f"[{self._get_timestamp_et()}] Stop Loss: ${stop_price:.2f} ({HARD_STOP_PCT}%)")
+
+            log_and_flush(f"\n[{self._get_timestamp_et()}] {'LONG' if side == OrderSide.BUY else 'SHORT'} SIGNAL DETECTED")
+            log_and_flush(f"[{self._get_timestamp_et()}] NVDA Signal Price: ${nvda_signal_price:.2f}")
+            log_and_flush(f"[{self._get_timestamp_et()}] TRADE SETUP:")
+            log_and_flush(f"[{self._get_timestamp_et()}]   Ticker: {ticker}")
+            log_and_flush(f"[{self._get_timestamp_et()}]   Reference ETF Price: ${etf_price:.2f}")
+            log_and_flush(f"[{self._get_timestamp_et()}]   Shares: {shares}")
+            log_and_flush(f"[{self._get_timestamp_et()}]   Position Value: ${notional_value:.2f}")
+            log_and_flush(f"[{self._get_timestamp_et()}]   Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of account)")
+            log_and_flush(f"[{self._get_timestamp_et()}]   Stop Loss: ${stop_price:.2f} (-{HARD_STOP_PCT}%)")
+            log_and_flush(f"[{self._get_timestamp_et()}] PLACING {'LONG' if side == OrderSide.BUY else 'SHORT'} ORDER")
             
             # Submit market order with stop loss
             # Using OTO (One-Triggers-Other) instead of BRACKET since we only have stop loss, no take profit
@@ -595,7 +639,7 @@ class NVDAOpeningRangeBot:
             )
             
             order = self.trading_client.submit_order(order_data)
-            print(f"[{self._get_timestamp_et()}] Order submitted - Order ID: {order.id}")
+            log_and_flush(f"[{self._get_timestamp_et()}] Order submitted - Order ID: {order.id}")
             
             # Wait for order to fill and verify
             await asyncio.sleep(3)
@@ -617,6 +661,7 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"Fill Price: ${actual_fill_price:.2f}")
                 log_and_flush(f"Position Value: ${actual_fill_price * filled_qty:.2f}")
                 log_and_flush(f"Stop Loss: ${stop_price:.2f} (-{HARD_STOP_PCT}%)")
+                log_and_flush(f"Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of account)")
                 log_and_flush(f"Status: {filled_order.status.upper()}")
                 log_and_flush(f"Timestamp: {self._get_timestamp_et()}")
                 log_and_flush(f"{'='*70}\n")
@@ -1029,25 +1074,27 @@ class NVDAOpeningRangeBot:
             try:
                 position = self.trading_client.get_open_position(LONG_TICKER)
                 if position is None:
-                    # Position doesn't exist - stop was hit
-                    expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
-                    
-                    log_and_flush(f"\n{'='*70}")
-                    log_and_flush(f"STOP LOSS HIT - POSITION CLOSED BY ALPACA")
-                    log_and_flush(f"{'='*70}")
-                    log_and_flush(f"Symbol: {LONG_TICKER}")
-                    log_and_flush(f"Entry Price: ${self.entry_price:.2f}")
-                    log_and_flush(f"Expected Stop: ${expected_stop:.2f}")
-                    log_and_flush(f"Estimated Loss: ${(expected_stop - self.entry_price) * self.shares:.2f} (-{HARD_STOP_PCT}%)")
-                    log_and_flush(f"")
-                    log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
-                    log_and_flush(f"   {LONG_TICKER} position no longer exists in account")
-                    log_and_flush(f"   Check Alpaca dashboard for exact fill price")
-                    log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
-                    log_and_flush(f"{'='*70}\n")
+                    if not self.log_exit_fill_details(LONG_TICKER):
+                        expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
+                        estimated_loss = (expected_stop - self.entry_price) * self.shares
+
+                        log_and_flush(f"\n{'='*70}")
+                        log_and_flush(f"STOP LOSS HIT - POSITION CLOSED BY ALPACA")
+                        log_and_flush(f"{'='*70}")
+                        log_and_flush(f"Symbol: {LONG_TICKER}")
+                        log_and_flush(f"Entry Price: ${self.entry_price:.2f}")
+                        log_and_flush(f"Expected Stop: ${expected_stop:.2f}")
+                        log_and_flush(f"Estimated Loss: ${estimated_loss:.2f} (-{HARD_STOP_PCT}%)")
+                        log_and_flush(f"")
+                        log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
+                        log_and_flush(f"   {LONG_TICKER} position no longer exists in account")
+                        log_and_flush(f"   Check Alpaca dashboard for exact fill price")
+                        log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
+                        log_and_flush(f"{'='*70}\n")
                     
                     self.position_entered = False
                     self.position_side = None
+                    self.stop_loss_order_id = None
                     return
             except Exception as e:
                 if not is_missing_position_error(e):
@@ -1055,20 +1102,22 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"[{self._get_timestamp_et()}] Keeping position state intact and retrying on next trade update")
                     return
 
-                log_and_flush(f"\n{'='*70}")
-                log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
-                log_and_flush(f"{'='*70}")
-                log_and_flush(f"Symbol: {LONG_TICKER}")
-                log_and_flush(f"Position no longer exists in Alpaca account")
-                log_and_flush(f"")
-                log_and_flush(f"CLOSURE VERIFIED WITH ALPACA")
-                log_and_flush(f"   Likely stop loss order executed")
-                log_and_flush(f"   Check dashboard for exact exit details:")
-                log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
-                log_and_flush(f"{'='*70}\n")
+                if not self.log_exit_fill_details(LONG_TICKER):
+                    log_and_flush(f"\n{'='*70}")
+                    log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
+                    log_and_flush(f"{'='*70}")
+                    log_and_flush(f"Symbol: {LONG_TICKER}")
+                    log_and_flush(f"Position no longer exists in Alpaca account")
+                    log_and_flush(f"")
+                    log_and_flush(f"CLOSURE VERIFIED WITH ALPACA")
+                    log_and_flush(f"   Likely stop loss order executed")
+                    log_and_flush(f"   Check dashboard for exact exit details:")
+                    log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
+                    log_and_flush(f"{'='*70}\n")
 
                 self.position_entered = False
                 self.position_side = None
+                self.stop_loss_order_id = None
                 return
             
             # Check for end of day exit
@@ -1112,25 +1161,27 @@ class NVDAOpeningRangeBot:
             try:
                 position = self.trading_client.get_open_position(SHORT_TICKER)
                 if position is None:
-                    # Position doesn't exist - stop was hit
-                    expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
-                    
-                    log_and_flush(f"\n{'='*70}")
-                    log_and_flush(f"STOP LOSS HIT - POSITION CLOSED BY ALPACA")
-                    log_and_flush(f"{'='*70}")
-                    log_and_flush(f"Symbol: {SHORT_TICKER}")
-                    log_and_flush(f"Entry Price: ${self.entry_price:.2f}")
-                    log_and_flush(f"Expected Stop: ${expected_stop:.2f}")
-                    log_and_flush(f"Estimated Loss: ${(expected_stop - self.entry_price) * self.shares:.2f} (-{HARD_STOP_PCT}%)")
-                    log_and_flush(f"")
-                    log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
-                    log_and_flush(f"   {SHORT_TICKER} position no longer exists in account")
-                    log_and_flush(f"   Check Alpaca dashboard for exact fill price")
-                    log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
-                    log_and_flush(f"{'='*70}\n")
+                    if not self.log_exit_fill_details(SHORT_TICKER):
+                        expected_stop = round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
+                        estimated_loss = (expected_stop - self.entry_price) * self.shares
+
+                        log_and_flush(f"\n{'='*70}")
+                        log_and_flush(f"STOP LOSS HIT - POSITION CLOSED BY ALPACA")
+                        log_and_flush(f"{'='*70}")
+                        log_and_flush(f"Symbol: {SHORT_TICKER}")
+                        log_and_flush(f"Entry Price: ${self.entry_price:.2f}")
+                        log_and_flush(f"Expected Stop: ${expected_stop:.2f}")
+                        log_and_flush(f"Estimated Loss: ${estimated_loss:.2f} (-{HARD_STOP_PCT}%)")
+                        log_and_flush(f"")
+                        log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
+                        log_and_flush(f"   {SHORT_TICKER} position no longer exists in account")
+                        log_and_flush(f"   Check Alpaca dashboard for exact fill price")
+                        log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
+                        log_and_flush(f"{'='*70}\n")
                     
                     self.position_entered = False
                     self.position_side = None
+                    self.stop_loss_order_id = None
                     return
             except Exception as e:
                 if not is_missing_position_error(e):
@@ -1138,20 +1189,22 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"[{self._get_timestamp_et()}] Keeping position state intact and retrying on next trade update")
                     return
 
-                log_and_flush(f"\n{'='*70}")
-                log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
-                log_and_flush(f"{'='*70}")
-                log_and_flush(f"Symbol: {SHORT_TICKER}")
-                log_and_flush(f"Position no longer exists in Alpaca account")
-                log_and_flush(f"")
-                log_and_flush(f"CLOSURE VERIFIED WITH ALPACA")
-                log_and_flush(f"   Likely stop loss order executed")
-                log_and_flush(f"   Check dashboard for exact exit details:")
-                log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
-                log_and_flush(f"{'='*70}\n")
+                if not self.log_exit_fill_details(SHORT_TICKER):
+                    log_and_flush(f"\n{'='*70}")
+                    log_and_flush(f"POSITION CLOSED - STOP LOSS TRIGGERED")
+                    log_and_flush(f"{'='*70}")
+                    log_and_flush(f"Symbol: {SHORT_TICKER}")
+                    log_and_flush(f"Position no longer exists in Alpaca account")
+                    log_and_flush(f"")
+                    log_and_flush(f"CLOSURE VERIFIED WITH ALPACA")
+                    log_and_flush(f"   Likely stop loss order executed")
+                    log_and_flush(f"   Check dashboard for exact exit details:")
+                    log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
+                    log_and_flush(f"{'='*70}\n")
 
                 self.position_entered = False
                 self.position_side = None
+                self.stop_loss_order_id = None
                 return
             
             # Check for end of day exit
