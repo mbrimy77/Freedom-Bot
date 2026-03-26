@@ -22,6 +22,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
     MarketOrderRequest,
     StopLossRequest,
+    StopOrderRequest,
     TrailingStopOrderRequest
 )
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
@@ -43,6 +44,9 @@ HARD_STOP_PCT = 1.5            # 1.5% hard stop loss
 PROFIT_TARGET_PCT = 3.0        # 3% profit to activate trailing stop
 TRAILING_STOP_PCT = 1.0        # 1% trailing stop after profit target hit
 MAX_TRADES_PER_DAY = 1         # Maximum one trade per day
+TRAILING_UPGRADE_RETRY_DELAY_SECONDS = 30
+ORDER_STATE_POLL_SECONDS = 0.5
+ORDER_STATE_TIMEOUT_SECONDS = 8
 
 # Time windows (ET = Eastern Time, CST = Central Time)
 ORB_START = time(9, 30)        # 9:30 AM ET (ORB start)
@@ -272,6 +276,8 @@ class NVDAOpeningRangeBot:
         self.shares = 0
         self.stop_loss_order_id = None
         self.profit_target_hit = False
+        self.trailing_upgrade_in_progress = False
+        self.trailing_upgrade_retry_after = None
         self.trades_today = 0
         
         # Track 5-minute candles (after ORB)
@@ -494,6 +500,163 @@ class NVDAOpeningRangeBot:
         except Exception as e:
             log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Could not fetch Alpaca exit fill details: {e}")
             return False
+
+    def _order_status_value(self, order):
+        """Normalize Alpaca order status values to lowercase strings."""
+        status = getattr(order, 'status', None)
+        if hasattr(status, 'value'):
+            return status.value.lower()
+        return str(status).lower()
+
+    def _order_type_value(self, order):
+        """Normalize Alpaca order type values to lowercase strings."""
+        order_type = getattr(order, 'order_type', getattr(order, 'type', None))
+        if hasattr(order_type, 'value'):
+            return order_type.value.lower()
+        return str(order_type).lower()
+
+    def get_protective_exit_side(self):
+        """Return the exit side for the currently open ETF position."""
+        return OrderSide.SELL if self.position_side == 'long' else OrderSide.BUY
+
+    def get_hard_stop_price(self):
+        """Calculate the current hard-stop price from the entry fill."""
+        if self.entry_price is None:
+            return None
+        if self.position_side == 'long':
+            return round(self.entry_price * (1 - HARD_STOP_PCT / 100), 2)
+        return round(self.entry_price * (1 + HARD_STOP_PCT / 100), 2)
+
+    def get_active_exit_orders(self, symbol):
+        """Return open stop and trailing-stop orders for a symbol."""
+        exit_orders = []
+        for order in self.trading_client.get_orders():
+            if getattr(order, 'symbol', None) != symbol:
+                continue
+            if self._order_type_value(order) in {'stop', 'trailing_stop'}:
+                exit_orders.append(order)
+        return exit_orders
+
+    def reset_position_state(self):
+        """Clear in-memory state once Alpaca confirms the position is flat."""
+        self.position_entered = False
+        self.position_side = None
+        self.entry_price = None
+        self.entry_ticker = None
+        self.active_ticker = None
+        self.shares = 0
+        self.stop_loss_order_id = None
+        self.profit_target_hit = False
+        self.trailing_upgrade_in_progress = False
+        self.trailing_upgrade_retry_after = None
+        self.highest_price_since_entry = None
+        self.lowest_price_since_entry = None
+
+    async def wait_for_order_status(self, order_id, target_statuses, label, failure_statuses=None, timeout_seconds=ORDER_STATE_TIMEOUT_SECONDS, missing_is_success=False):
+        """Poll Alpaca until an order reaches the expected state."""
+        target_statuses = {status.lower() for status in target_statuses}
+        failure_statuses = {status.lower() for status in (failure_statuses or set())}
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_status = "unknown"
+        last_order = None
+
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                last_order = self.trading_client.get_order_by_id(order_id)
+            except Exception as e:
+                if missing_is_success:
+                    log_and_flush(f"{label} no longer retrievable in Alpaca - treating as complete")
+                    return True, None
+                last_status = f"lookup_error: {e}"
+                await asyncio.sleep(ORDER_STATE_POLL_SECONDS)
+                continue
+
+            last_status = self._order_status_value(last_order)
+            if last_status in target_statuses:
+                return True, last_order
+            if last_status in failure_statuses:
+                return False, last_order
+
+            await asyncio.sleep(ORDER_STATE_POLL_SECONDS)
+
+        log_and_flush(f"WARNING: Timed out waiting for {label} (last status: {last_status})")
+        return False, last_order
+
+    async def cancel_order_and_wait(self, order_id, label):
+        """Cancel an order and wait for Alpaca to release the reserved shares."""
+        try:
+            self.trading_client.cancel_order_by_id(order_id)
+            log_and_flush(f"{label} cancel submitted - waiting for Alpaca confirmation")
+        except Exception as e:
+            log_and_flush(f"ERROR canceling {label}: {e}")
+            return False
+
+        success, order = await self.wait_for_order_status(
+            order_id=order_id,
+            target_statuses={'canceled', 'cancelled'},
+            failure_statuses={'filled', 'rejected', 'expired'},
+            label=label,
+            missing_is_success=True
+        )
+        if success:
+            log_and_flush(f"{label} canceled - shares are free again")
+            return True
+
+        status = self._order_status_value(order) if order else 'unknown'
+        log_and_flush(f"ERROR: {label} did not cancel cleanly (status: {status})")
+        return False
+
+    async def submit_replacement_hard_stop(self):
+        """Re-arm a plain hard stop if the trailing-stop upgrade fails."""
+        stop_price = self.get_hard_stop_price()
+        if stop_price is None:
+            log_and_flush("ERROR: Cannot restore hard stop without an entry price")
+            return False
+
+        try:
+            stop_request = StopOrderRequest(
+                symbol=self.entry_ticker,
+                qty=self.shares,
+                side=self.get_protective_exit_side(),
+                time_in_force=TimeInForce.DAY,
+                stop_price=stop_price
+            )
+            stop_order = self.trading_client.submit_order(stop_request)
+            log_and_flush(f"Replacement hard stop submitted - Order ID: {stop_order.id} @ ${stop_price:.2f}")
+        except Exception as e:
+            log_and_flush(f"CRITICAL: Failed to restore hard stop: {e}")
+            return False
+
+        success, confirmed_order = await self.wait_for_order_status(
+            order_id=stop_order.id,
+            target_statuses={'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'partially_filled'},
+            failure_statuses={'rejected', 'canceled', 'cancelled', 'expired'},
+            label="Replacement hard stop"
+        )
+        if not success:
+            return False
+
+        self.stop_loss_order_id = confirmed_order.id if confirmed_order else stop_order.id
+        log_and_flush("Hard stop protection restored")
+        return True
+
+    async def wait_for_position_closed(self, symbol, timeout_seconds=ORDER_STATE_TIMEOUT_SECONDS):
+        """Poll Alpaca until the position is no longer open."""
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_qty = None
+
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                position = self.trading_client.get_open_position(symbol)
+                last_qty = float(position.qty)
+                await asyncio.sleep(ORDER_STATE_POLL_SECONDS)
+            except Exception as e:
+                if is_missing_position_error(e):
+                    return True, None
+                log_and_flush(f"WARNING checking whether {symbol} is closed: {e}")
+                await asyncio.sleep(ORDER_STATE_POLL_SECONDS)
+
+        return False, last_qty
     
     def check_existing_position(self):
         """Check if a position already exists for NVDL or NVD"""
@@ -683,6 +846,10 @@ class NVDAOpeningRangeBot:
                 self.entry_ticker = ticker
                 self.entry_price = actual_fill_price
                 self.shares = shares
+                self.stop_loss_order_id = None
+                self.profit_target_hit = False
+                self.trailing_upgrade_in_progress = False
+                self.trailing_upgrade_retry_after = None
                 self.trades_today += 1
                 
                 # Log exit strategy clearly
@@ -761,7 +928,9 @@ class NVDAOpeningRangeBot:
     
     async def check_profit_target(self, current_price):
         """Check if profit target reached and upgrade to trailing stop"""
-        if self.profit_target_hit or not self.position_entered:
+        if self.profit_target_hit or not self.position_entered or self.trailing_upgrade_in_progress:
+            return
+        if self.trailing_upgrade_retry_after and datetime.now(TIMEZONE_ET) < self.trailing_upgrade_retry_after:
             return
         
         try:
@@ -783,48 +952,63 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"Current Price: ${current_price:.2f}")
                 log_and_flush(f"Upgrading to {TRAILING_STOP_PCT}% Trailing Stop...")
                 log_and_flush(f"")
-                
-                # CRITICAL: Place trailing stop BEFORE canceling hard stop
-                # This ensures we ALWAYS have stop protection (no gap)
-                trailing_order = None
+
+                self.trailing_upgrade_in_progress = True
                 try:
+                    if self.stop_loss_order_id:
+                        log_and_flush(f"Step 1/4: Cancel current hard stop ({self.stop_loss_order_id})")
+                        canceled = await self.cancel_order_and_wait(self.stop_loss_order_id, "Existing hard stop")
+                        if not canceled:
+                            self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
+                            log_and_flush("Trailing-stop upgrade aborted - hard stop is still active")
+                            log_and_flush(f"Will retry trailing-stop upgrade after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
+                            log_and_flush(f"{'='*70}\n")
+                            return
+
+                    log_and_flush("Step 2/4: Submit trailing stop")
                     trailing_stop_request = TrailingStopOrderRequest(
                         symbol=self.entry_ticker,
                         qty=self.shares,
-                        side=OrderSide.SELL if self.position_side == 'long' else OrderSide.BUY,
+                        side=self.get_protective_exit_side(),
                         time_in_force=TimeInForce.DAY,
                         trail_percent=TRAILING_STOP_PCT
                     )
                     
                     trailing_order = self.trading_client.submit_order(trailing_stop_request)
-                    log_and_flush(f"Trailing Stop order placed - Order ID: {trailing_order.id}")
-                    await asyncio.sleep(0.5)  # Brief pause to ensure order is active
-                    
-                except Exception as e:
-                    log_and_flush(f"ERROR placing trailing stop: {e}")
-                    log_and_flush(f"KEEPING HARD STOP ACTIVE - Did not cancel for safety")
+                    log_and_flush(f"Trailing stop submitted - Order ID: {trailing_order.id}")
+                    log_and_flush("Step 3/4: Wait for Alpaca to confirm the trailing stop is active")
+
+                    success, confirmed_order = await self.wait_for_order_status(
+                        order_id=trailing_order.id,
+                        target_statuses={'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'partially_filled'},
+                        failure_statuses={'rejected', 'canceled', 'cancelled', 'expired'},
+                        label="Trailing stop"
+                    )
+                    if not success:
+                        raise RuntimeError("Trailing stop was not accepted by Alpaca")
+
+                    self.stop_loss_order_id = confirmed_order.id if confirmed_order else trailing_order.id
+                    self.profit_target_hit = True
+                    self.trailing_upgrade_retry_after = None
+                    log_and_flush("Step 4/4: Upgrade confirmed")
+                    log_and_flush("")
+                    log_and_flush("UPGRADE COMPLETE")
+                    log_and_flush(f"   Protection: {TRAILING_STOP_PCT}% Trailing Stop now active")
+                    log_and_flush("   Stop will move up as price increases")
                     log_and_flush(f"{'='*70}\n")
-                    return  # Keep hard stop if trailing stop fails
-                
-                # NOW cancel hard stop (only after trailing stop is active)
-                if self.stop_loss_order_id and trailing_order:
-                    try:
-                        self.trading_client.cancel_order_by_id(self.stop_loss_order_id)
-                        log_and_flush(f"Hard stop canceled (replaced by trailing stop)")
-                        self.stop_loss_order_id = trailing_order.id
-                        self.profit_target_hit = True
-                    except Exception as e:
-                        log_and_flush(f"WARNING: Error canceling hard stop: {e}")
-                        log_and_flush(f"   Both stops may be active temporarily")
-                        log_and_flush(f"   Trailing stop will manage position going forward")
-                        self.stop_loss_order_id = trailing_order.id
-                        self.profit_target_hit = True
-                
-                log_and_flush(f"")
-                log_and_flush(f"UPGRADE COMPLETE")
-                log_and_flush(f"   Protection: {TRAILING_STOP_PCT}% Trailing Stop now active")
-                log_and_flush(f"   Stop will move up as price increases")
-                log_and_flush(f"{'='*70}\n")
+                except Exception as e:
+                    log_and_flush(f"ERROR upgrading to trailing stop: {e}")
+                    log_and_flush("Attempting to restore hard-stop protection...")
+                    restored = await self.submit_replacement_hard_stop()
+                    self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
+                    if restored:
+                        log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
+                    else:
+                        log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
+                    log_and_flush(f"{'='*70}\n")
+                    return
+                finally:
+                    self.trailing_upgrade_in_progress = False
         
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR checking profit target: {e}")
@@ -864,18 +1048,16 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"Final P&L: ${final_pl:.2f} ({final_pl_pct:+.2f}%)")
                     log_and_flush(f"")
                     
-                    # STEP 1: Check for active stop orders BEFORE closing
+                    # STEP 1: Cancel active stop orders BEFORE closing
                     stop_orders_found = []
                     try:
-                        all_orders = self.trading_client.get_orders()
-                        for order in all_orders:
-                            if order.symbol == position.symbol and order.type in ['stop', 'trailing_stop']:
-                                stop_orders_found.append({
-                                    'id': order.id,
-                                    'type': order.type,
-                                    'stop_price': getattr(order, 'stop_price', None),
-                                    'trail_percent': getattr(order, 'trail_percent', None)
-                                })
+                        for order in self.get_active_exit_orders(position.symbol):
+                            stop_orders_found.append({
+                                'id': order.id,
+                                'type': self._order_type_value(order),
+                                'stop_price': getattr(order, 'stop_price', None),
+                                'trail_percent': getattr(order, 'trail_percent', None)
+                            })
                         
                         if stop_orders_found:
                             log_and_flush(f"Active stop order(s) found:")
@@ -884,78 +1066,81 @@ class NVDAOpeningRangeBot:
                     except Exception as e:
                         log_and_flush(f"Could not check for stop orders: {e}")
                     
-                    # STEP 2: Close the position (Alpaca should cancel stops automatically)
+                    if stop_orders_found:
+                        log_and_flush(f"")
+                        log_and_flush(f"Canceling protective orders before market close...")
+                        all_canceled = True
+                        for stop in stop_orders_found:
+                            label = f"{stop['type']} order {stop['id']}"
+                            if not await self.cancel_order_and_wait(stop['id'], label):
+                                all_canceled = False
+                        
+                        if not all_canceled:
+                            log_and_flush(f"ERROR: Could not clear all protective orders. Skipping close attempt to avoid an insufficient-qty rejection.")
+                            log_and_flush(f"Check Alpaca dashboard immediately!")
+                            continue
+                        
+                        remaining_exit_orders = self.get_active_exit_orders(position.symbol)
+                        if remaining_exit_orders:
+                            log_and_flush(f"ERROR: Alpaca still shows active protective orders after cancel attempts.")
+                            for order in remaining_exit_orders:
+                                log_and_flush(f"   Remaining order: {order.id} ({self._order_type_value(order)})")
+                            log_and_flush(f"Skipping close attempt until shares are fully released.")
+                            continue
+                    
+                    # STEP 2: Close the position after exits are cleared
                     log_and_flush(f"")
-                    log_and_flush(f"Closing position...")
-                    self.trading_client.close_position(position.symbol)
-                    log_and_flush(f"Close order submitted to Alpaca")
-                    log_and_flush(f"   (Alpaca will auto-cancel associated stop orders)")
+                    log_and_flush(f"Protective orders cleared - submitting market close")
+                    close_order = self.trading_client.close_position(position.symbol)
+                    close_order_id = getattr(close_order, 'id', None)
+                    if close_order_id:
+                        log_and_flush(f"Close order submitted to Alpaca - Order ID: {close_order_id}")
+                    else:
+                        log_and_flush(f"Close order submitted to Alpaca")
                     
                     # STEP 3: Wait for close to process
-                    await asyncio.sleep(2)
+                    position_closed, remaining_qty = await self.wait_for_position_closed(position.symbol, timeout_seconds=12)
                     
                     # STEP 4: Verify position is closed
-                    try:
-                        check_position = self.trading_client.get_open_position(position.symbol)
-                        log_and_flush(f"")
-                        log_and_flush(f"WARNING: Position still exists after close attempt!")
-                        log_and_flush(f"   Current qty: {float(check_position.qty)}")
-                        log_and_flush(f"   Check Alpaca dashboard immediately!")
-                    except Exception:
-                        # Position doesn't exist = successfully closed
+                    if position_closed:
                         log_and_flush(f"")
                         log_and_flush(f"POSITION CLOSED - VERIFIED WITH ALPACA")
                         log_and_flush(f"   {position.symbol} position no longer exists in account")
-                    
-                    # STEP 5: Verify stop orders were canceled
-                    if stop_orders_found:
+                    else:
                         log_and_flush(f"")
-                        log_and_flush(f"Verifying stop order(s) were canceled...")
-                        await asyncio.sleep(1)
-                        
-                        try:
-                            remaining_orders = self.trading_client.get_orders()
-                            stops_still_active = []
-                            
-                            for stop in stop_orders_found:
-                                for order in remaining_orders:
-                                    if order.id == stop['id']:
-                                        stops_still_active.append(stop['id'])
-                            
-                            if stops_still_active:
-                                log_and_flush(f"WARNING: {len(stops_still_active)} stop order(s) still active!")
-                                log_and_flush(f"   Manually canceling...")
-                                for order_id in stops_still_active:
-                                    try:
-                                        self.trading_client.cancel_order_by_id(order_id)
-                                        log_and_flush(f"   Canceled stop order: {order_id}")
-                                    except Exception as e:
-                                        log_and_flush(f"   Could not cancel {order_id}: {e}")
-                            else:
-                                log_and_flush(f"All stop orders automatically canceled by Alpaca")
-                        except Exception as e:
-                            log_and_flush(f"Could not verify stop cancellation: {e}")
+                        log_and_flush(f"WARNING: Position still exists after close attempt!")
+                        if remaining_qty is not None:
+                            log_and_flush(f"   Current qty: {remaining_qty}")
+                        log_and_flush(f"   Check Alpaca dashboard immediately!")
             
-            # STEP 6: Final check - cancel any remaining pending orders
+            open_strategy_positions = []
             try:
-                remaining_orders = self.trading_client.get_orders()
-                if remaining_orders:
-                    log_and_flush(f"")
-                    log_and_flush(f"Found {len(remaining_orders)} remaining order(s) - canceling...")
-                    self.trading_client.cancel_orders()
-                    log_and_flush(f"All remaining orders canceled")
-                else:
-                    log_and_flush(f"")
-                    log_and_flush(f"No pending orders remaining")
+                for position in self.trading_client.get_all_positions():
+                    if position.symbol in [LONG_TICKER, SHORT_TICKER]:
+                        open_strategy_positions.append(position.symbol)
             except Exception as e:
-                log_and_flush(f"WARNING: Error checking pending orders: {e}")
-            
-            log_and_flush(f"{'='*70}\n")
-            
-            self.position_entered = False
-            self.position_side = None
-            self.entry_price = None
-            self.entry_ticker = None
+                log_and_flush(f"WARNING: Could not run final position verification: {e}")
+
+            if not open_strategy_positions:
+                try:
+                    remaining_orders = self.trading_client.get_orders()
+                    if remaining_orders:
+                        log_and_flush(f"")
+                        log_and_flush(f"Found {len(remaining_orders)} remaining order(s) after flattening - canceling...")
+                        self.trading_client.cancel_orders()
+                        log_and_flush(f"All remaining orders canceled")
+                    else:
+                        log_and_flush(f"")
+                        log_and_flush(f"No pending orders remaining")
+                except Exception as e:
+                    log_and_flush(f"WARNING: Error checking pending orders: {e}")
+
+                log_and_flush(f"{'='*70}\n")
+                self.reset_position_state()
+            else:
+                log_and_flush(f"{'='*70}\n")
+                log_and_flush(f"WARNING: Strategy position still open after close sequence: {', '.join(open_strategy_positions)}")
+                log_and_flush(f"Keeping in-memory position state intact for the next retry or manual intervention.")
             
         except Exception as e:
             log_and_flush(f"ERROR closing positions: {e}")
@@ -1092,9 +1277,7 @@ class NVDAOpeningRangeBot:
                         log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
                         log_and_flush(f"{'='*70}\n")
                     
-                    self.position_entered = False
-                    self.position_side = None
-                    self.stop_loss_order_id = None
+                    self.reset_position_state()
                     return
             except Exception as e:
                 if not is_missing_position_error(e):
@@ -1115,9 +1298,7 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
                     log_and_flush(f"{'='*70}\n")
 
-                self.position_entered = False
-                self.position_side = None
-                self.stop_loss_order_id = None
+                self.reset_position_state()
                 return
             
             # Check for end of day exit
@@ -1179,9 +1360,7 @@ class NVDAOpeningRangeBot:
                         log_and_flush(f"   Dashboard: https://app.alpaca.markets/paper/dashboard/overview")
                         log_and_flush(f"{'='*70}\n")
                     
-                    self.position_entered = False
-                    self.position_side = None
-                    self.stop_loss_order_id = None
+                    self.reset_position_state()
                     return
             except Exception as e:
                 if not is_missing_position_error(e):
@@ -1202,9 +1381,7 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"   https://app.alpaca.markets/paper/dashboard/overview")
                     log_and_flush(f"{'='*70}\n")
 
-                self.position_entered = False
-                self.position_side = None
-                self.stop_loss_order_id = None
+                self.reset_position_state()
                 return
             
             # Check for end of day exit
