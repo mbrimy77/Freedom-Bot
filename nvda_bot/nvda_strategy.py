@@ -606,6 +606,33 @@ class NVDAOpeningRangeBot:
         log_and_flush(f"ERROR: {label} did not cancel cleanly (status: {status})")
         return False
 
+    async def submit_plain_stop_order(self, symbol, qty, stop_price, exit_side, label):
+        """Submit a standalone stop order and wait for Alpaca to accept it."""
+        try:
+            stop_request = StopOrderRequest(
+                symbol=symbol,
+                qty=qty,
+                side=exit_side,
+                time_in_force=TimeInForce.DAY,
+                stop_price=stop_price
+            )
+            stop_order = self.trading_client.submit_order(stop_request)
+            log_and_flush(f"{label} submitted - Order ID: {stop_order.id} @ ${stop_price:.2f}")
+        except Exception as e:
+            log_and_flush(f"CRITICAL: Failed to submit {label.lower()}: {e}")
+            return None
+
+        success, confirmed_order = await self.wait_for_order_status(
+            order_id=stop_order.id,
+            target_statuses={'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'partially_filled'},
+            failure_statuses={'rejected', 'canceled', 'cancelled', 'expired'},
+            label=label
+        )
+        if not success:
+            return None
+
+        return confirmed_order.id if confirmed_order else stop_order.id
+
     async def submit_replacement_hard_stop(self):
         """Re-arm a plain hard stop if the trailing-stop upgrade fails."""
         stop_price = self.get_hard_stop_price()
@@ -613,32 +640,52 @@ class NVDAOpeningRangeBot:
             log_and_flush("ERROR: Cannot restore hard stop without an entry price")
             return False
 
-        try:
-            stop_request = StopOrderRequest(
-                symbol=self.entry_ticker,
-                qty=self.shares,
-                side=self.get_protective_exit_side(),
-                time_in_force=TimeInForce.DAY,
-                stop_price=stop_price
-            )
-            stop_order = self.trading_client.submit_order(stop_request)
-            log_and_flush(f"Replacement hard stop submitted - Order ID: {stop_order.id} @ ${stop_price:.2f}")
-        except Exception as e:
-            log_and_flush(f"CRITICAL: Failed to restore hard stop: {e}")
-            return False
-
-        success, confirmed_order = await self.wait_for_order_status(
-            order_id=stop_order.id,
-            target_statuses={'new', 'accepted', 'pending_new', 'accepted_for_bidding', 'partially_filled'},
-            failure_statuses={'rejected', 'canceled', 'cancelled', 'expired'},
+        stop_order_id = await self.submit_plain_stop_order(
+            symbol=self.entry_ticker,
+            qty=self.shares,
+            stop_price=stop_price,
+            exit_side=self.get_protective_exit_side(),
             label="Replacement hard stop"
         )
-        if not success:
+        if not stop_order_id:
             return False
 
-        self.stop_loss_order_id = confirmed_order.id if confirmed_order else stop_order.id
+        self.stop_loss_order_id = stop_order_id
         log_and_flush("Hard stop protection restored")
         return True
+
+    def activate_live_position(self, ticker, side, fill_price, filled_qty):
+        """Record the actual Alpaca fill as the bot's live position."""
+        self.position_entered = True
+        self.position_side = 'long' if side == OrderSide.BUY else 'short'
+        self.entry_ticker = ticker
+        self.entry_price = fill_price
+        self.shares = filled_qty
+        self.stop_loss_order_id = None
+        self.profit_target_hit = False
+        self.trailing_upgrade_in_progress = False
+        self.trailing_upgrade_retry_after = None
+        self.highest_price_since_entry = fill_price
+        self.lowest_price_since_entry = fill_price
+        self.trades_today = MAX_TRADES_PER_DAY
+
+    async def cancel_active_exit_orders(self, symbol, context):
+        """Cancel any stop or trailing orders still active for the symbol."""
+        try:
+            exit_orders = self.get_active_exit_orders(symbol)
+        except Exception as e:
+            log_and_flush(f"WARNING: Could not inspect active exit orders after {context}: {e}")
+            return False
+
+        if not exit_orders:
+            return True
+
+        all_canceled = True
+        for exit_order in exit_orders:
+            label = f"{context} cleanup order {exit_order.id}"
+            if not await self.cancel_order_and_wait(exit_order.id, label):
+                all_canceled = False
+        return all_canceled
 
     async def wait_for_position_closed(self, symbol, timeout_seconds=ORDER_STATE_TIMEOUT_SECONDS):
         """Poll Alpaca until the position is no longer open."""
@@ -809,10 +856,12 @@ class NVDAOpeningRangeBot:
             
             # Check order status
             filled_order = self.trading_client.get_order_by_id(order.id)
-            
-            if filled_order.status == 'filled':
-                actual_fill_price = float(filled_order.filled_avg_price)
-                filled_qty = float(filled_order.filled_qty)
+            order_status = self._order_status_value(filled_order)
+            filled_qty = float(getattr(filled_order, 'filled_qty', 0) or 0)
+            filled_avg_price = getattr(filled_order, 'filled_avg_price', None)
+            actual_fill_price = float(filled_avg_price) if filled_avg_price is not None and filled_qty > 0 else None
+
+            if order_status == 'filled':
                 
                 log_and_flush(f"\n{'='*70}")
                 log_and_flush(f"TRADE OPENED - CONFIRMED WITH ALPACA")
@@ -841,16 +890,7 @@ class NVDAOpeningRangeBot:
                     log_and_flush(f"WARNING: Could not verify position in Alpaca: {e}\n")
                 
                 # NOW set position state (only after confirming fill)
-                self.position_entered = True
-                self.position_side = 'long' if side == OrderSide.BUY else 'short'
-                self.entry_ticker = ticker
-                self.entry_price = actual_fill_price
-                self.shares = shares
-                self.stop_loss_order_id = None
-                self.profit_target_hit = False
-                self.trailing_upgrade_in_progress = False
-                self.trailing_upgrade_retry_after = None
-                self.trades_today += 1
+                self.activate_live_position(ticker, side, actual_fill_price, filled_qty)
                 
                 # Log exit strategy clearly
                 log_and_flush(f"===== EXIT STRATEGY ACTIVE =====")
@@ -861,12 +901,50 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"=================================\n")
                 
                 # Initialize price tracking for trailing stop
-                self.highest_price_since_entry = actual_fill_price
-                self.lowest_price_since_entry = actual_fill_price
-                
                 # Get stop loss order ID
                 await self.get_child_orders(order.id)
                 
+                return True
+            elif order_status == 'partially_filled' and filled_qty > 0 and actual_fill_price is not None:
+                log_and_flush(f"\n{'='*70}")
+                log_and_flush(f"PARTIAL FILL DETECTED - PROTECTING LIVE POSITION")
+                log_and_flush(f"{'='*70}")
+                log_and_flush(f"Order ID: {order.id}")
+                log_and_flush(f"Symbol: {ticker}")
+                log_and_flush(f"Requested Shares: {shares}")
+                log_and_flush(f"Shares Filled: {int(filled_qty)}")
+                log_and_flush(f"Unfilled Shares: {int(shares - filled_qty)}")
+                log_and_flush(f"Fill Price: ${actual_fill_price:.2f}")
+                log_and_flush(f"Status After 3s Check: {order_status.upper()}")
+
+                cancel_ok = await self.cancel_order_and_wait(order.id, "Unfilled entry remainder")
+                if not cancel_ok:
+                    log_and_flush("WARNING: Could not confirm the unfilled remainder was canceled cleanly")
+
+                cleanup_ok = await self.cancel_active_exit_orders(ticker, "Partial-fill entry")
+                if not cleanup_ok:
+                    log_and_flush("WARNING: Could not fully clear old exit orders before installing a new stop")
+
+                self.activate_live_position(ticker, side, actual_fill_price, filled_qty)
+                replacement_stop_id = await self.submit_replacement_hard_stop()
+                if not replacement_stop_id:
+                    log_and_flush("CRITICAL: Partial fill exists but hard-stop protection could not be restored")
+                    log_and_flush("Attempting emergency close of the partial position...")
+                    await self.close_all_positions(f"UNPROTECTED PARTIAL FILL for {ticker}")
+                    return False
+
+                log_and_flush(f"Replacement Stop Loss: ${stop_price:.2f} (-{HARD_STOP_PCT}%)")
+                log_and_flush(f"Expected Max Loss On Filled Shares: ${actual_fill_price * filled_qty * (HARD_STOP_PCT / 100):.2f}")
+                log_and_flush(f"Status: PARTIALLY FILLED POSITION IS NOW PROTECTED")
+                log_and_flush(f"Timestamp: {self._get_timestamp_et()}")
+                log_and_flush(f"{'='*70}\n")
+
+                log_and_flush(f"===== EXIT STRATEGY ACTIVE =====")
+                log_and_flush(f"1. HARD STOP @ ${stop_price:.2f} (-{HARD_STOP_PCT}%) - Replaced after partial fill")
+                log_and_flush(f"2. PROFIT TARGET @ ${actual_fill_price * (1 + PROFIT_TARGET_PCT / 100):.2f} (+{PROFIT_TARGET_PCT}%) - Upgrades to {TRAILING_STOP_PCT}% trailing stop")
+                log_and_flush(f"3. END OF DAY EXIT @ 2:30 PM CST (3:30 PM ET) - Forced exit regardless of P&L")
+                log_and_flush(f"Monitoring position for stop hits and profit target...")
+                log_and_flush(f"=================================\n")
                 return True
             else:
                 print(f"[{self._get_timestamp_et()}] FAILED: ORDER NOT FILLED - Status: {filled_order.status}")
@@ -878,6 +956,24 @@ class NVDAOpeningRangeBot:
                     print(f"[{self._get_timestamp_et()}] Order cancelled")
                 except:
                     pass
+
+                # A timeout can still leave a small fill behind; flatten it if that happened.
+                try:
+                    position = self.trading_client.get_open_position(ticker)
+                    actual_qty = float(position.qty)
+                    if actual_qty > 0:
+                        log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Entry order timed out but Alpaca shows {actual_qty} shares open")
+                        self.activate_live_position(
+                            ticker,
+                            side,
+                            float(getattr(position, 'avg_entry_price', etf_price)),
+                            actual_qty
+                        )
+                        await self.cancel_active_exit_orders(ticker, "Timed-out entry")
+                        await self.close_all_positions(f"ENTRY TIMED OUT AFTER 3 SECONDS - FLATTENING {ticker}")
+                except Exception as position_error:
+                    if not is_missing_position_error(position_error):
+                        log_and_flush(f"[{self._get_timestamp_et()}] WARNING checking for leftover shares after timeout: {position_error}")
                 
                 return False
             
