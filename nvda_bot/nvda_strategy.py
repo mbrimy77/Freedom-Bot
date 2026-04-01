@@ -1006,6 +1006,15 @@ class NVDAOpeningRangeBot:
                             self.stop_loss_order_id = leg.id
                             print(f"[{self._get_timestamp_et()}] Stop Loss Order ID: {self.stop_loss_order_id}")
                             break
+            # Fallback: if nested legs are unavailable, discover active protective exits directly.
+            if not self.stop_loss_order_id and self.entry_ticker:
+                exit_orders = self.get_active_exit_orders(self.entry_ticker)
+                if exit_orders:
+                    self.stop_loss_order_id = exit_orders[0].id
+                    log_and_flush(
+                        f"[{self._get_timestamp_et()}] Protective order discovered via open-order scan: "
+                        f"{self.stop_loss_order_id} ({self._order_type_value(exit_orders[0])})"
+                    )
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR getting child orders: {e}")
     
@@ -1051,15 +1060,26 @@ class NVDAOpeningRangeBot:
 
                 self.trailing_upgrade_in_progress = True
                 try:
-                    if self.stop_loss_order_id:
-                        log_and_flush(f"Step 1/4: Cancel current hard stop ({self.stop_loss_order_id})")
-                        canceled = await self.cancel_order_and_wait(self.stop_loss_order_id, "Existing hard stop")
+                    # Always clear any active protective exits first (even if stop_loss_order_id is missing).
+                    active_exits = self.get_active_exit_orders(self.entry_ticker)
+                    if active_exits:
+                        if not self.stop_loss_order_id:
+                            self.stop_loss_order_id = active_exits[0].id
+                            log_and_flush(
+                                f"Detected existing protective order despite missing cached ID: {self.stop_loss_order_id} "
+                                f"({self._order_type_value(active_exits[0])})"
+                            )
+                        log_and_flush(f"Step 1/4: Cancel {len(active_exits)} existing protective order(s)")
+                        canceled = await self.cancel_active_exit_orders(self.entry_ticker, "Trailing-stop upgrade")
                         if not canceled:
                             self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
-                            log_and_flush("Trailing-stop upgrade aborted - hard stop is still active")
+                            log_and_flush("Trailing-stop upgrade aborted - protective order cancel still pending")
                             log_and_flush(f"Will retry trailing-stop upgrade after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
                             log_and_flush(f"{'='*70}\n")
                             return
+                        self.stop_loss_order_id = None
+                    else:
+                        log_and_flush("Step 1/4: No active protective orders found to cancel")
 
                     log_and_flush("Step 2/4: Submit trailing stop")
                     trailing_stop_request = TrailingStopOrderRequest(
@@ -1093,14 +1113,34 @@ class NVDAOpeningRangeBot:
                     log_and_flush("   Stop will move up as price increases")
                     log_and_flush(f"{'='*70}\n")
                 except Exception as e:
+                    error_text = str(e).lower()
                     log_and_flush(f"ERROR upgrading to trailing stop: {e}")
-                    log_and_flush("Attempting to restore hard-stop protection...")
-                    restored = await self.submit_replacement_hard_stop()
                     self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
-                    if restored:
-                        log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
+
+                    # Alpaca can report qty=0 while another protective order still reserves shares.
+                    if "insufficient qty available for order" in error_text:
+                        log_and_flush("Detected reserved shares from an existing protective order. Keeping current protection and retrying upgrade.")
+                        existing_exits = self.get_active_exit_orders(self.entry_ticker)
+                        if existing_exits:
+                            self.stop_loss_order_id = existing_exits[0].id
+                            log_and_flush(
+                                f"Existing protection still active: {self.stop_loss_order_id} "
+                                f"({self._order_type_value(existing_exits[0])})"
+                            )
+                        else:
+                            log_and_flush("No active protective order found after rejection - attempting to restore hard stop...")
+                            restored = await self.submit_replacement_hard_stop()
+                            if restored:
+                                log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
+                            else:
+                                log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
                     else:
-                        log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
+                        log_and_flush("Attempting to restore hard-stop protection...")
+                        restored = await self.submit_replacement_hard_stop()
+                        if restored:
+                            log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
+                        else:
+                            log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
                     log_and_flush(f"{'='*70}\n")
                     return
                 finally:
