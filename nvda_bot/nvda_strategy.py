@@ -59,6 +59,18 @@ END_OF_DAY_EXIT_ET = time(15, 30)  # 3:30 PM ET
 TIMEZONE_ET = pytz.timezone('America/New_York')
 TIMEZONE_CST = pytz.timezone('America/Chicago')
 
+
+def format_log_timestamp(date_time=None):
+    """Format log timestamps in Minnesota local time with AM/PM."""
+    if date_time is None:
+        date_time = datetime.now(TIMEZONE_CST)
+    elif date_time.tzinfo is None:
+        date_time = TIMEZONE_CST.localize(date_time)
+    else:
+        date_time = date_time.astimezone(TIMEZONE_CST)
+    return date_time.strftime('%Y-%m-%d %I:%M:%S %p %Z')
+
+
 # Startup coordination
 RESTART_TRACKER_FILE = "/tmp/nvda_bot_restart_count.txt"
 CONNECTION_LOCK_FILE = "/tmp/nvda_bot_connection.lock"
@@ -122,8 +134,8 @@ async def wait_until_session_start():
 
         wait_seconds = max(1, int((next_start - now_et).total_seconds()))
         log_and_flush(
-            f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Outside trading window. "
-            f"Sleeping until {next_start.strftime('%Y-%m-%d %H:%M:%S %Z')}"
+            f"[{format_log_timestamp(now_et)}] Outside trading window. "
+            f"Sleeping until {format_log_timestamp(next_start)}"
         )
         await asyncio.sleep(wait_seconds)
 
@@ -306,12 +318,12 @@ class NVDAOpeningRangeBot:
         print(f"[{self._get_timestamp_et()}] Paper Trading: Enabled")
     
     def _get_timestamp_et(self):
-        """Get current timestamp in ET"""
-        return datetime.now(TIMEZONE_ET).strftime('%Y-%m-%d %H:%M:%S %Z')
+        """Get current log timestamp in Minnesota local time."""
+        return format_log_timestamp()
     
     def _get_timestamp_cst(self):
-        """Get current timestamp in CST"""
-        return datetime.now(TIMEZONE_CST).strftime('%Y-%m-%d %H:%M:%S %Z')
+        """Get current log timestamp in Minnesota local time."""
+        return format_log_timestamp()
     
     def _get_current_time_et(self):
         """Get current time in ET timezone"""
@@ -351,7 +363,7 @@ class NVDAOpeningRangeBot:
             next_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
             
             print(f"[{self._get_timestamp_et()}] Market closed (weekend)")
-            print(f"[{self._get_timestamp_et()}] Next open: Monday {next_open.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            print(f"[{self._get_timestamp_et()}] Next open: Monday {format_log_timestamp(next_open)}")
             print(f"[{self._get_timestamp_et()}] Waiting for next market open...")
             await asyncio.sleep((next_open - now_et).total_seconds())
             print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
@@ -362,7 +374,7 @@ class NVDAOpeningRangeBot:
         
         if now_et < market_open_time:
             wait_seconds = (market_open_time - now_et).total_seconds()
-            print(f"[{self._get_timestamp_et()}] Market opens at 9:30 AM ET")
+            print(f"[{self._get_timestamp_et()}] Market opens at 8:30 AM CT")
             print(f"[{self._get_timestamp_et()}] {wait_seconds:.0f} seconds until open")
 
             print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for market open...")
@@ -406,7 +418,7 @@ class NVDAOpeningRangeBot:
                         return
                     
                     print(f"\n[{self._get_timestamp_et()}] ===== OPENING RANGE ESTABLISHED =====")
-                    print(f"[{self._get_timestamp_et()}] Time: 9:30-9:45 AM ET (15 minutes)")
+                    print(f"[{self._get_timestamp_et()}] Time: 8:30-8:45 AM CT (15 minutes)")
                     print(f"[{self._get_timestamp_et()}] ORB High: ${self.orb_high:.2f}")
                     print(f"[{self._get_timestamp_et()}] ORB Low: ${self.orb_low:.2f}")
                     print(f"[{self._get_timestamp_et()}] ORB Range: ${self.orb_high - self.orb_low:.2f}")
@@ -479,10 +491,12 @@ class NVDAOpeningRangeBot:
         return 100 - (100 / (1 + rs))
 
     def format_et_range(self, start_time, end_time):
-        """Format an ET datetime range for log output."""
+        """Format a datetime range for log output in Minnesota local time."""
+        start_time = start_time.astimezone(TIMEZONE_CST)
+        end_time = end_time.astimezone(TIMEZONE_CST)
         return (
-            f"{start_time.strftime('%H:%M')} - "
-            f"{end_time.strftime('%H:%M %Z')}"
+            f"{start_time.strftime('%I:%M %p')} - "
+            f"{end_time.strftime('%I:%M %p %Z')}"
         )
 
     async def get_symbol_snapshot_context(self, symbol):
@@ -1179,7 +1193,7 @@ class NVDAOpeningRangeBot:
                     f"Hard Stop: ${stop_price:.2f} (-{HARD_STOP_PCT}%)",
                     f"Profit Trigger: ${profit_target_price:.2f} (+{PROFIT_TARGET_PCT}%)",
                     f"Trailing Stop After Trigger: {TRAILING_STOP_PCT}%",
-                    "Forced Exit Time: 2:30 PM CST (3:30 PM ET)",
+                    "Forced Exit Time: 2:30 PM CT",
                     "Monitoring position for stop hits and profit target...",
                     "=" * 70,
                 ])
@@ -1223,7 +1237,7 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"===== EXIT STRATEGY ACTIVE =====")
                 log_and_flush(f"1. HARD STOP @ ${stop_price:.2f} (-{HARD_STOP_PCT}%) - Replaced after partial fill")
                 log_and_flush(f"2. PROFIT TARGET @ ${actual_fill_price * (1 + PROFIT_TARGET_PCT / 100):.2f} (+{PROFIT_TARGET_PCT}%) - Upgrades to {TRAILING_STOP_PCT}% trailing stop")
-                log_and_flush(f"3. END OF DAY EXIT @ 2:30 PM CST (3:30 PM ET) - Forced exit regardless of P&L")
+                log_and_flush(f"3. END OF DAY EXIT @ 2:30 PM CT - Forced exit regardless of P&L")
                 log_and_flush(f"Monitoring position for stop hits and profit target...")
                 log_and_flush(f"=================================\n")
                 return True
@@ -1341,7 +1355,10 @@ class NVDAOpeningRangeBot:
                         if not canceled:
                             self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
                             log_and_flush("Trailing-stop upgrade aborted - hard stop is still active")
-                            log_and_flush(f"Will retry trailing-stop upgrade after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
+                            log_and_flush(
+                                f"Will retry trailing-stop upgrade after "
+                                f"{format_log_timestamp(self.trailing_upgrade_retry_after)}"
+                            )
                             log_and_flush(f"{'='*70}\n")
                             return
 
@@ -1382,7 +1399,10 @@ class NVDAOpeningRangeBot:
                     restored = await self.submit_replacement_hard_stop()
                     self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
                     if restored:
-                        log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
+                        log_and_flush(
+                            f"Hard stop restored. Next upgrade retry after "
+                            f"{format_log_timestamp(self.trailing_upgrade_retry_after)}"
+                        )
                     else:
                         log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
                     log_and_flush(f"{'='*70}\n")
@@ -1864,30 +1884,30 @@ class NVDAOpeningRangeBot:
         
         # Check if we missed the ORB window
         if current_time_et > time(9, 45):
-            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Started after ORB period (9:30-9:45 AM ET)")
+            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Started after ORB period (8:30-8:45 AM CT)")
             log_and_flush(f"[{self._get_timestamp_et()}] Cannot establish Opening Range - no new trades today")
-            log_and_flush(f"[{self._get_timestamp_et()}] Will monitor existing positions only until 2:30 PM CST exit")
+            log_and_flush(f"[{self._get_timestamp_et()}] Will monitor existing positions only until 2:30 PM CT exit")
             self.trades_today = MAX_TRADES_PER_DAY  # Prevent trading
         else:
             log_and_flush(f"[{self._get_timestamp_et()}] Ready to trade - ORB period active or upcoming")
         
         print(f"\n[{self._get_timestamp_et()}] STRATEGY CONFIGURATION:")
-        print(f"[{self._get_timestamp_et()}] Phase 1 (9:30-9:45 AM): Track 15-min ORB")
-        print(f"[{self._get_timestamp_et()}] Phase 2 (After 9:45 AM): Monitor 5-min candles for breakouts")
+        print(f"[{self._get_timestamp_et()}] Phase 1 (8:30-8:45 AM CT): Track 15-min ORB")
+        print(f"[{self._get_timestamp_et()}] Phase 2 (After 8:45 AM CT): Monitor 5-min candles for breakouts")
         print(f"[{self._get_timestamp_et()}] Long Entry: 5-min body entirely above ORB High -> Buy {LONG_TICKER}")
         print(f"[{self._get_timestamp_et()}] Short Entry: 5-min body entirely below ORB Low -> Buy {SHORT_TICKER}")
         print(f"[{self._get_timestamp_et()}] Max Trades: {MAX_TRADES_PER_DAY}")
         print(f"[{self._get_timestamp_et()}] Exit Strategy:")
         print(f"[{self._get_timestamp_et()}]   Stage 1: {HARD_STOP_PCT}% Hard Stop Loss")
         print(f"[{self._get_timestamp_et()}]   Stage 2: {PROFIT_TARGET_PCT}% Profit -> {TRAILING_STOP_PCT}% Trailing Stop")
-        print(f"[{self._get_timestamp_et()}]   Stage 3: End of Day Exit at 2:30 PM CST (3:30 PM ET)")
-        print(f"[{self._get_timestamp_et()}] Trading Window: 9:30 AM - 3:30 PM ET (6 hours)\n")
+        print(f"[{self._get_timestamp_et()}]   Stage 3: End of Day Exit at 2:30 PM CT")
+        print(f"[{self._get_timestamp_et()}] Trading Window: 8:30 AM - 2:30 PM CT (6 hours)\n")
         
         # Mark that we're tracking ORB (only if before 9:45 AM)
         now_et = datetime.now(TIMEZONE_ET)
         if now_et.time() <= ORB_END:
             self.orb_tracking = True
-            log_and_flush(f"[{self._get_timestamp_et()}] ORB tracking enabled - will track 9:30-9:45 AM range")
+            log_and_flush(f"[{self._get_timestamp_et()}] ORB tracking enabled - will track 8:30-8:45 AM CT range")
         else:
             self.orb_tracking = False
             self.orb_established = True  # Skip ORB since we're past the window
@@ -1909,7 +1929,7 @@ class NVDAOpeningRangeBot:
         log_and_flush(f"[{self._get_timestamp_et()}] Subscribed to {MONITOR_TICKER} bars (ORB + entry signals)")
         log_and_flush(f"[{self._get_timestamp_et()}] Subscribed to {LONG_TICKER} trades (position monitoring)")
         log_and_flush(f"[{self._get_timestamp_et()}] Subscribed to {SHORT_TICKER} trades (position monitoring)")
-        log_and_flush(f"[{self._get_timestamp_et()}] Tracking 9:30-9:45 AM opening range...\n")
+        log_and_flush(f"[{self._get_timestamp_et()}] Tracking 8:30-8:45 AM CT opening range...\n")
         
         # Run the stream - use _run_forever() directly since we already have an event loop
         # The stream.run() method calls asyncio.run() which fails when a loop is already running
@@ -1968,15 +1988,17 @@ async def main():
         current_time_et = now_et.time()
         current_time_cst = now_cst.time()
 
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] NVDA Bot Starting...")
-        log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time ET: {current_time_et}")
-        log_and_flush(f"[{now_cst.strftime('%Y-%m-%d %H:%M:%S %Z')}] Current time CST: {current_time_cst}")
+        log_and_flush(f"[{format_log_timestamp(now_cst)}] NVDA Bot Starting...")
+        log_and_flush(
+            f"[{format_log_timestamp(now_cst)}] Current time CT: "
+            f"{now_cst.strftime('%I:%M:%S %p %Z')}"
+        )
 
         # Check if we missed the ORB window (after 9:45 AM ET)
         if current_time_et > time(9, 45):
-            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] WARNING: Starting after ORB period (9:30-9:45 AM ET)")
-            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Bot will check for existing positions but won't enter new trades")
-            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Reason: Cannot establish Opening Range after 9:45 AM")
+            log_and_flush(f"[{format_log_timestamp(now_cst)}] WARNING: Starting after ORB period (8:30-8:45 AM CT)")
+            log_and_flush(f"[{format_log_timestamp(now_cst)}] Bot will check for existing positions but won't enter new trades")
+            log_and_flush(f"[{format_log_timestamp(now_cst)}] Reason: Cannot establish Opening Range after 8:45 AM CT")
 
         bot = NVDAOpeningRangeBot()
         await bot.run()
@@ -1985,7 +2007,7 @@ async def main():
         now_et = datetime.now(TIMEZONE_ET)
         now_cst = datetime.now(TIMEZONE_CST)
         if now_et.weekday() < 5 and now_et.time() < END_OF_DAY_EXIT_ET and now_cst.time() < END_OF_DAY_EXIT:
-            log_and_flush(f"[{now_et.strftime('%Y-%m-%d %H:%M:%S %Z')}] Bot run exited during active hours. Retrying in 60 seconds.")
+            log_and_flush(f"[{format_log_timestamp(now_cst)}] Bot run exited during active hours. Retrying in 60 seconds.")
             await asyncio.sleep(60)
 
 
