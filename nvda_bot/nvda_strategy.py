@@ -28,8 +28,8 @@ from alpaca.trading.requests import (
 from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass, QueryOrderStatus
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.live import StockDataStream
-from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest
-from alpaca.data.timeframe import TimeFrame
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, StockSnapshotRequest
+from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 # Load environment variables
 load_dotenv()
@@ -268,6 +268,9 @@ class NVDAOpeningRangeBot:
         self.orb_low = None
         self.orb_established = False
         self.orb_tracking = False  # True when we're tracking ORB (9:30-9:45)
+        self.orb_volume = 0
+        self.orb_avg_20d_volume = None
+        self.orb_relative_volume = None
         self.position_entered = False
         self.position_side = None  # 'long' or 'short'
         self.entry_price = None
@@ -414,14 +417,17 @@ class NVDAOpeningRangeBot:
                 # Now process the bar (only bars before 9:45 AM)
                 bar_high = float(bar.high)
                 bar_low = float(bar.low)
+                bar_volume = float(getattr(bar, 'volume', 0) or 0)
                 
                 if self.orb_high is None:
                     self.orb_high = bar_high
                     self.orb_low = bar_low
+                    self.orb_volume = bar_volume
                     print(f"[{self._get_timestamp_et()}] ORB tracking started - First bar: High=${bar_high:.2f}, Low=${bar_low:.2f}")
                 else:
                     self.orb_high = max(self.orb_high, bar_high)
                     self.orb_low = min(self.orb_low, bar_low)
+                    self.orb_volume += bar_volume
                 
                 return
             
@@ -446,6 +452,171 @@ class NVDAOpeningRangeBot:
         max_loss_pct = (max_loss / ACCOUNT_SIZE) * 100
 
         return shares, notional_value, max_loss, max_loss_pct
+
+    def calculate_rsi(self, closes, period=14):
+        """Calculate Wilder RSI for a sequence of closes."""
+        if len(closes) <= period:
+            return None
+
+        gains = []
+        losses = []
+        for idx in range(1, len(closes)):
+            change = closes[idx] - closes[idx - 1]
+            gains.append(max(change, 0))
+            losses.append(max(-change, 0))
+
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+
+        for idx in range(period, len(gains)):
+            avg_gain = ((avg_gain * (period - 1)) + gains[idx]) / period
+            avg_loss = ((avg_loss * (period - 1)) + losses[idx]) / period
+
+        if avg_loss == 0:
+            return 100.0
+
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
+
+    def format_et_range(self, start_time, end_time):
+        """Format an ET datetime range for log output."""
+        return (
+            f"{start_time.strftime('%H:%M')} - "
+            f"{end_time.strftime('%H:%M %Z')}"
+        )
+
+    async def get_symbol_snapshot_context(self, symbol):
+        """Get current price, previous close, and day change for a stock/ETF."""
+        try:
+            snapshot_data = self.data_client.get_stock_snapshot(
+                StockSnapshotRequest(symbol_or_symbols=symbol)
+            )
+            snapshot = snapshot_data.get(symbol) if hasattr(snapshot_data, 'get') else None
+            if snapshot is None:
+                return None
+
+            previous_bar = getattr(snapshot, 'previous_daily_bar', None)
+            latest_trade = getattr(snapshot, 'latest_trade', None)
+            latest_quote = getattr(snapshot, 'latest_quote', None)
+            minute_bar = getattr(snapshot, 'minute_bar', None)
+            daily_bar = getattr(snapshot, 'daily_bar', None)
+
+            previous_close = float(previous_bar.close) if previous_bar and getattr(previous_bar, 'close', None) is not None else None
+
+            current_price = None
+            if latest_trade and getattr(latest_trade, 'price', None) is not None:
+                current_price = float(latest_trade.price)
+            elif latest_quote:
+                bid_price = float(getattr(latest_quote, 'bid_price', 0) or 0)
+                ask_price = float(getattr(latest_quote, 'ask_price', 0) or 0)
+                if bid_price > 0 and ask_price > 0:
+                    current_price = (bid_price + ask_price) / 2
+                elif ask_price > 0:
+                    current_price = ask_price
+                elif bid_price > 0:
+                    current_price = bid_price
+            elif minute_bar and getattr(minute_bar, 'close', None) is not None:
+                current_price = float(minute_bar.close)
+            elif daily_bar and getattr(daily_bar, 'close', None) is not None:
+                current_price = float(daily_bar.close)
+
+            if current_price is None or previous_close in (None, 0):
+                return None
+
+            day_change_pct = ((current_price - previous_close) / previous_close) * 100
+            return {
+                "current_price": current_price,
+                "previous_close": previous_close,
+                "day_change_pct": day_change_pct,
+            }
+        except Exception as e:
+            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Could not fetch snapshot context for {symbol}: {e}")
+            return None
+
+    async def get_breakout_candle_rsi(self, breakout_candle, period=14):
+        """Calculate RSI(14) for the completed breakout candle using NVDA 5-minute bars."""
+        candle_start = breakout_candle.get('start_time')
+        if candle_start is None:
+            return None
+
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=MONITOR_TICKER,
+                timeframe=TimeFrame(5, TimeFrameUnit.Minute),
+                start=candle_start - timedelta(days=10),
+                end=breakout_candle.get('end_time', candle_start + timedelta(minutes=5))
+            )
+            bars = self.data_client.get_stock_bars(request)
+            if MONITOR_TICKER not in bars:
+                return None
+
+            closes = []
+            for bar in bars[MONITOR_TICKER]:
+                bar_time_et = bar.timestamp.astimezone(TIMEZONE_ET)
+                if bar_time_et.time() < ORB_START or bar_time_et.time() >= time(16, 0):
+                    continue
+                if bar_time_et > candle_start:
+                    continue
+                closes.append(float(bar.close))
+
+            return self.calculate_rsi(closes, period=period)
+        except Exception as e:
+            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Could not calculate breakout RSI: {e}")
+            return None
+
+    async def get_average_orb_volume(self, lookback_sessions=20):
+        """Calculate the average NVDA ORB volume across the prior trading sessions."""
+        now_et = datetime.now(TIMEZONE_ET)
+        current_session = now_et.date()
+
+        try:
+            request = StockBarsRequest(
+                symbol_or_symbols=MONITOR_TICKER,
+                timeframe=TimeFrame.Minute,
+                start=now_et - timedelta(days=45),
+                end=now_et
+            )
+            bars = self.data_client.get_stock_bars(request)
+            if MONITOR_TICKER not in bars:
+                return None
+
+            orb_volume_by_day = {}
+            for bar in bars[MONITOR_TICKER]:
+                bar_time_et = bar.timestamp.astimezone(TIMEZONE_ET)
+                session_date = bar_time_et.date()
+                if session_date >= current_session:
+                    continue
+                if ORB_START <= bar_time_et.time() < ORB_END:
+                    orb_volume_by_day.setdefault(session_date, 0.0)
+                    orb_volume_by_day[session_date] += float(getattr(bar, 'volume', 0) or 0)
+
+            prior_sessions = sorted(orb_volume_by_day.keys())[-lookback_sessions:]
+            if not prior_sessions:
+                return None
+
+            total_volume = sum(orb_volume_by_day[session] for session in prior_sessions)
+            return total_volume / len(prior_sessions)
+        except Exception as e:
+            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Could not calculate 20-day ORB average volume: {e}")
+            return None
+
+    async def build_entry_context(self, breakout_candle):
+        """Build the entry-context metrics shown just before order submission."""
+        if self.orb_avg_20d_volume is None:
+            self.orb_avg_20d_volume = await self.get_average_orb_volume()
+        if self.orb_avg_20d_volume and self.orb_avg_20d_volume > 0:
+            self.orb_relative_volume = self.orb_volume / self.orb_avg_20d_volume
+
+        breakout_rsi = await self.get_breakout_candle_rsi(breakout_candle)
+        qqq_context = await self.get_symbol_snapshot_context("QQQ")
+
+        return {
+            "breakout_rsi": breakout_rsi,
+            "qqq_context": qqq_context,
+            "orb_volume": self.orb_volume,
+            "orb_avg_20d_volume": self.orb_avg_20d_volume,
+            "orb_relative_volume": self.orb_relative_volume,
+        }
 
     def get_exit_label(self, order_type_value=None):
         """Describe whether the exit came from a hard stop or trailing stop."""
@@ -771,8 +942,8 @@ class NVDAOpeningRangeBot:
             log_and_flush(f"[{self._get_timestamp_et()}] ERROR checking for unexpected positions: {e}")
             return False
     
-    async def get_latest_price(self, ticker: str):
-        """Get the latest quote price for a ticker"""
+    async def get_latest_quote_details(self, ticker: str):
+        """Get bid/ask/reference quote details for a ticker."""
         try:
             request = StockLatestQuoteRequest(symbol_or_symbols=ticker)
             latest_quote = self.data_client.get_stock_latest_quote(request)
@@ -795,22 +966,36 @@ class NVDAOpeningRangeBot:
                     f"[{self._get_timestamp_et()}] {ticker} Latest Quote - "
                     f"Bid: ${bid_price:.2f}, Ask: ${ask_price:.2f}, Ref: ${reference_price:.2f}"
                 )
-                return reference_price
+                return {
+                    "bid_price": bid_price,
+                    "ask_price": ask_price,
+                    "reference_price": reference_price,
+                    "spread": max(0.0, ask_price - bid_price)
+                }
             else:
                 print(f"[{self._get_timestamp_et()}] ERROR: No quote data for {ticker}")
                 return None
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR getting latest price for {ticker}: {e}")
             return None
+
+    async def get_latest_price(self, ticker: str):
+        """Get the reference quote price for a ticker."""
+        quote_details = await self.get_latest_quote_details(ticker)
+        if quote_details is None:
+            return None
+        return quote_details["reference_price"]
     
-    async def place_trade_with_stop(self, ticker: str, side: OrderSide, nvda_signal_price: float):
+    async def place_trade_with_stop(self, ticker: str, side: OrderSide, nvda_signal_price: float, breakout_candle=None):
         """Place trade with bracket order (entry + stop loss)"""
         try:
             # Get the actual current price of the ETF we're trading
-            etf_price = await self.get_latest_price(ticker)
-            if etf_price is None:
+            quote_details = await self.get_latest_quote_details(ticker)
+            if quote_details is None:
                 print(f"[{self._get_timestamp_et()}] ERROR: Could not get price for {ticker}. Order cancelled.")
                 return False
+            etf_price = quote_details["reference_price"]
+            direction_label = 'LONG' if side == OrderSide.BUY else 'SHORT'
             
             # Calculate position size based on ETF price (not NVDA price!)
             shares, notional_value, max_loss, max_loss_pct = self.calculate_position_size(etf_price)
@@ -825,17 +1010,76 @@ class NVDAOpeningRangeBot:
                 stop_price = round(etf_price * (1 - HARD_STOP_PCT / 100), 2)
             else:
                 stop_price = round(etf_price * (1 + HARD_STOP_PCT / 100), 2)
+            log_and_flush(
+                f"\n{'='*70}\n"
+                f"ENTRY SIGNAL\n"
+                f"{'='*70}\n"
+                f"Time: {self._get_timestamp_et()}\n"
+                f"Direction: {direction_label}\n"
+                f"Signal Symbol: {MONITOR_TICKER}\n"
+                f"Signal Price: ${nvda_signal_price:.2f}\n"
+                f"Trade Symbol: {ticker}\n"
+                f"Quote At Decision: Bid=${quote_details['bid_price']:.2f} | "
+                f"Ask=${quote_details['ask_price']:.2f} | Ref=${etf_price:.2f} | "
+                f"Spread=${quote_details['spread']:.2f}\n"
+                f"Sizing: Shares={shares} | Notional=${notional_value:.2f}\n"
+                f"Initial Stop: ${stop_price:.2f} (-{HARD_STOP_PCT}%)\n"
+                f"Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of account)\n"
+                f"{'='*70}"
+            )
 
-            log_and_flush(f"\n[{self._get_timestamp_et()}] {'LONG' if side == OrderSide.BUY else 'SHORT'} SIGNAL DETECTED")
-            log_and_flush(f"[{self._get_timestamp_et()}] NVDA Signal Price: ${nvda_signal_price:.2f}")
-            log_and_flush(f"[{self._get_timestamp_et()}] TRADE SETUP:")
-            log_and_flush(f"[{self._get_timestamp_et()}]   Ticker: {ticker}")
-            log_and_flush(f"[{self._get_timestamp_et()}]   Reference ETF Price: ${etf_price:.2f}")
-            log_and_flush(f"[{self._get_timestamp_et()}]   Shares: {shares}")
-            log_and_flush(f"[{self._get_timestamp_et()}]   Position Value: ${notional_value:.2f}")
-            log_and_flush(f"[{self._get_timestamp_et()}]   Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of account)")
-            log_and_flush(f"[{self._get_timestamp_et()}]   Stop Loss: ${stop_price:.2f} (-{HARD_STOP_PCT}%)")
-            log_and_flush(f"[{self._get_timestamp_et()}] PLACING {'LONG' if side == OrderSide.BUY else 'SHORT'} ORDER")
+            if breakout_candle is not None:
+                entry_context = await self.build_entry_context(breakout_candle)
+                breakout_start = breakout_candle.get('start_time')
+                breakout_end = breakout_candle.get('end_time')
+                context_lines = [
+                    "",
+                    "=" * 70,
+                    "ENTRY CONTEXT",
+                    "=" * 70,
+                ]
+                if breakout_start and breakout_end:
+                    context_lines.append(
+                        f"Breakout Candle Window: {self.format_et_range(breakout_start, breakout_end)}"
+                    )
+                context_lines.append(
+                    "Breakout Candle: "
+                    f"O=${breakout_candle.get('open', 0):.2f} | "
+                    f"H=${breakout_candle.get('high', 0):.2f} | "
+                    f"L=${breakout_candle.get('low', 0):.2f} | "
+                    f"C=${breakout_candle.get('close', 0):.2f}"
+                )
+
+                breakout_rsi = entry_context["breakout_rsi"]
+                if breakout_rsi is not None:
+                    context_lines.append(f"NVDA 5-Min RSI(14): {breakout_rsi:.1f}")
+                else:
+                    context_lines.append("NVDA 5-Min RSI(14): UNAVAILABLE")
+
+                qqq_context = entry_context["qqq_context"]
+                if qqq_context:
+                    context_lines.append("")
+                    context_lines.append(f"QQQ Current: ${qqq_context['current_price']:.2f}")
+                    context_lines.append(f"QQQ Prior Close: ${qqq_context['previous_close']:.2f}")
+                    context_lines.append(f"QQQ Day Change: {qqq_context['day_change_pct']:+.2f}%")
+                else:
+                    context_lines.append("")
+                    context_lines.append("QQQ Current: UNAVAILABLE")
+                    context_lines.append("QQQ Prior Close: UNAVAILABLE")
+                    context_lines.append("QQQ Day Change: UNAVAILABLE")
+
+                orb_volume = entry_context["orb_volume"]
+                avg_orb_volume = entry_context["orb_avg_20d_volume"]
+                rel_volume = entry_context["orb_relative_volume"]
+                context_lines.append("")
+                context_lines.append(f"ORB Volume Today: {int(orb_volume):,}" if orb_volume is not None else "ORB Volume Today: UNAVAILABLE")
+                context_lines.append(f"ORB Volume 20D Avg: {avg_orb_volume:,.0f}" if avg_orb_volume is not None else "ORB Volume 20D Avg: UNAVAILABLE")
+                if rel_volume is not None:
+                    context_lines.append(f"ORB Relative Volume: {rel_volume:.2f}x ({(rel_volume - 1) * 100:+.1f}%)")
+                else:
+                    context_lines.append("ORB Relative Volume: UNAVAILABLE")
+                context_lines.append("=" * 70)
+                log_and_flush("\n".join(context_lines))
             
             # Submit market order with stop loss
             # Using OTO (One-Triggers-Other) instead of BRACKET since we only have stop loss, no take profit
@@ -849,7 +1093,18 @@ class NVDAOpeningRangeBot:
             )
             
             order = self.trading_client.submit_order(order_data)
-            log_and_flush(f"[{self._get_timestamp_et()}] Order submitted - Order ID: {order.id}")
+            log_and_flush(
+                f"\n{'='*70}\n"
+                f"ENTRY ORDER SUBMITTED\n"
+                f"{'='*70}\n"
+                f"Time: {self._get_timestamp_et()}\n"
+                f"Order ID: {order.id}\n"
+                f"Order Type: MARKET + OTO STOP\n"
+                f"Side: {direction_label}\n"
+                f"Symbol: {ticker}\n"
+                f"Qty: {shares}\n"
+                f"{'='*70}"
+            )
             
             # Wait for order to fill and verify
             await asyncio.sleep(3)
@@ -862,47 +1117,73 @@ class NVDAOpeningRangeBot:
             actual_fill_price = float(filled_avg_price) if filled_avg_price is not None and filled_qty > 0 else None
 
             if order_status == 'filled':
-                
-                log_and_flush(f"\n{'='*70}")
-                log_and_flush(f"TRADE OPENED - CONFIRMED WITH ALPACA")
-                log_and_flush(f"{'='*70}")
-                log_and_flush(f"Order ID: {order.id}")
-                log_and_flush(f"Symbol: {ticker}")
-                log_and_flush(f"Side: {'LONG' if side == OrderSide.BUY else 'SHORT'}")
-                log_and_flush(f"Shares Filled: {int(filled_qty)}")
-                log_and_flush(f"Fill Price: ${actual_fill_price:.2f}")
-                log_and_flush(f"Position Value: ${actual_fill_price * filled_qty:.2f}")
-                log_and_flush(f"Stop Loss: ${stop_price:.2f} (-{HARD_STOP_PCT}%)")
-                log_and_flush(f"Expected Max Loss: ${max_loss:.2f} ({max_loss_pct:.2f}% of account)")
-                log_and_flush(f"Status: {filled_order.status.upper()}")
-                log_and_flush(f"Timestamp: {self._get_timestamp_et()}")
-                log_and_flush(f"{'='*70}\n")
+                entry_slippage_per_share = actual_fill_price - etf_price
+                total_entry_slippage = entry_slippage_per_share * filled_qty
+                log_and_flush(
+                    f"\n{'='*70}\n"
+                    f"ENTRY FILLED\n"
+                    f"{'='*70}\n"
+                    f"Time: {self._get_timestamp_et()}\n"
+                    f"Order ID: {order.id}\n"
+                    f"Status: {filled_order.status.upper()}\n"
+                    f"Symbol: {ticker}\n"
+                    f"Side: {direction_label}\n"
+                    f"Shares Filled: {int(filled_qty)}\n"
+                    f"Reference Price At Signal: ${etf_price:.2f}\n"
+                    f"Fill Price: ${actual_fill_price:.2f}\n"
+                    f"Entry Slippage: ${entry_slippage_per_share:+.2f}/share | "
+                    f"${total_entry_slippage:+.2f} total\n"
+                    f"Position Value: ${actual_fill_price * filled_qty:.2f}\n"
+                    f"{'='*70}"
+                )
                 
                 # Verify position exists in Alpaca
+                position_verified = False
+                position_current_price = None
+                position_market_value = None
                 try:
                     position = self.trading_client.get_open_position(ticker)
-                    log_and_flush(f"POSITION VERIFIED IN ALPACA:")
-                    log_and_flush(f"   Symbol: {position.symbol}")
-                    log_and_flush(f"   Qty: {float(position.qty)}")
-                    log_and_flush(f"   Current Price: ${float(position.current_price):.2f}")
-                    log_and_flush(f"   Market Value: ${float(position.market_value):.2f}\n")
+                    position_verified = True
+                    position_current_price = float(position.current_price)
+                    position_market_value = float(position.market_value)
                 except Exception as e:
                     log_and_flush(f"WARNING: Could not verify position in Alpaca: {e}\n")
                 
                 # NOW set position state (only after confirming fill)
                 self.activate_live_position(ticker, side, actual_fill_price, filled_qty)
                 
-                # Log exit strategy clearly
-                log_and_flush(f"===== EXIT STRATEGY ACTIVE =====")
-                log_and_flush(f"1. HARD STOP @ ${stop_price:.2f} (-{HARD_STOP_PCT}%) - Set on Alpaca, executes automatically")
-                log_and_flush(f"2. PROFIT TARGET @ ${actual_fill_price * (1 + PROFIT_TARGET_PCT / 100):.2f} (+{PROFIT_TARGET_PCT}%) - Upgrades to {TRAILING_STOP_PCT}% trailing stop")
-                log_and_flush(f"3. END OF DAY EXIT @ 2:30 PM CST (3:30 PM ET) - Forced exit regardless of P&L")
-                log_and_flush(f"Monitoring position for stop hits and profit target...")
-                log_and_flush(f"=================================\n")
-                
                 # Initialize price tracking for trailing stop
                 # Get stop loss order ID
-                await self.get_child_orders(order.id)
+                protective_order_id, protective_order_type = await self.get_child_orders(order.id)
+                profit_target_price = actual_fill_price * (1 + PROFIT_TARGET_PCT / 100)
+                protection_lines = [
+                    "",
+                    "=" * 70,
+                    "ENTRY PROTECTION ACTIVE",
+                    "=" * 70,
+                    f"Time: {self._get_timestamp_et()}",
+                    f"Position Verified: {'YES' if position_verified else 'NO'}",
+                    f"Protected Symbol: {ticker}",
+                    f"Protected Qty: {int(filled_qty)}",
+                ]
+                if position_verified and position_current_price is not None and position_market_value is not None:
+                    protection_lines.append(f"Current Price: ${position_current_price:.2f}")
+                    protection_lines.append(f"Market Value: ${position_market_value:.2f}")
+                if protective_order_id:
+                    protection_lines.append(f"Protective Order ID: {protective_order_id}")
+                    protection_lines.append(f"Protective Order Type: {protective_order_type}")
+                else:
+                    protection_lines.append("Protective Order ID: NOT FOUND")
+                    protection_lines.append("Protective Order Type: UNKNOWN")
+                protection_lines.extend([
+                    f"Hard Stop: ${stop_price:.2f} (-{HARD_STOP_PCT}%)",
+                    f"Profit Trigger: ${profit_target_price:.2f} (+{PROFIT_TARGET_PCT}%)",
+                    f"Trailing Stop After Trigger: {TRAILING_STOP_PCT}%",
+                    "Forced Exit Time: 2:30 PM CST (3:30 PM ET)",
+                    "Monitoring position for stop hits and profit target...",
+                    "=" * 70,
+                ])
+                log_and_flush("\n".join(protection_lines))
                 
                 return True
             elif order_status == 'partially_filled' and filled_qty > 0 and actual_fill_price is not None:
@@ -1004,19 +1285,13 @@ class NVDAOpeningRangeBot:
                         leg_order = self.trading_client.get_order_by_id(leg.id)
                         if leg_order.order_type.value == 'stop':
                             self.stop_loss_order_id = leg.id
-                            print(f"[{self._get_timestamp_et()}] Stop Loss Order ID: {self.stop_loss_order_id}")
-                            break
-            # Fallback: if nested legs are unavailable, discover active protective exits directly.
-            if not self.stop_loss_order_id and self.entry_ticker:
-                exit_orders = self.get_active_exit_orders(self.entry_ticker)
-                if exit_orders:
-                    self.stop_loss_order_id = exit_orders[0].id
-                    log_and_flush(
-                        f"[{self._get_timestamp_et()}] Protective order discovered via open-order scan: "
-                        f"{self.stop_loss_order_id} ({self._order_type_value(exit_orders[0])})"
-                    )
+                            return self.stop_loss_order_id, leg_order.order_type.value
+            if self.stop_loss_order_id:
+                return self.stop_loss_order_id, "stop"
+            return None, None
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR getting child orders: {e}")
+            return None, None
     
     def should_log_periodic_update(self):
         """Check if 30 seconds have passed since last log"""
@@ -1060,26 +1335,15 @@ class NVDAOpeningRangeBot:
 
                 self.trailing_upgrade_in_progress = True
                 try:
-                    # Always clear any active protective exits first (even if stop_loss_order_id is missing).
-                    active_exits = self.get_active_exit_orders(self.entry_ticker)
-                    if active_exits:
-                        if not self.stop_loss_order_id:
-                            self.stop_loss_order_id = active_exits[0].id
-                            log_and_flush(
-                                f"Detected existing protective order despite missing cached ID: {self.stop_loss_order_id} "
-                                f"({self._order_type_value(active_exits[0])})"
-                            )
-                        log_and_flush(f"Step 1/4: Cancel {len(active_exits)} existing protective order(s)")
-                        canceled = await self.cancel_active_exit_orders(self.entry_ticker, "Trailing-stop upgrade")
+                    if self.stop_loss_order_id:
+                        log_and_flush(f"Step 1/4: Cancel current hard stop ({self.stop_loss_order_id})")
+                        canceled = await self.cancel_order_and_wait(self.stop_loss_order_id, "Existing hard stop")
                         if not canceled:
                             self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
-                            log_and_flush("Trailing-stop upgrade aborted - protective order cancel still pending")
+                            log_and_flush("Trailing-stop upgrade aborted - hard stop is still active")
                             log_and_flush(f"Will retry trailing-stop upgrade after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
                             log_and_flush(f"{'='*70}\n")
                             return
-                        self.stop_loss_order_id = None
-                    else:
-                        log_and_flush("Step 1/4: No active protective orders found to cancel")
 
                     log_and_flush("Step 2/4: Submit trailing stop")
                     trailing_stop_request = TrailingStopOrderRequest(
@@ -1113,34 +1377,14 @@ class NVDAOpeningRangeBot:
                     log_and_flush("   Stop will move up as price increases")
                     log_and_flush(f"{'='*70}\n")
                 except Exception as e:
-                    error_text = str(e).lower()
                     log_and_flush(f"ERROR upgrading to trailing stop: {e}")
+                    log_and_flush("Attempting to restore hard-stop protection...")
+                    restored = await self.submit_replacement_hard_stop()
                     self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
-
-                    # Alpaca can report qty=0 while another protective order still reserves shares.
-                    if "insufficient qty available for order" in error_text:
-                        log_and_flush("Detected reserved shares from an existing protective order. Keeping current protection and retrying upgrade.")
-                        existing_exits = self.get_active_exit_orders(self.entry_ticker)
-                        if existing_exits:
-                            self.stop_loss_order_id = existing_exits[0].id
-                            log_and_flush(
-                                f"Existing protection still active: {self.stop_loss_order_id} "
-                                f"({self._order_type_value(existing_exits[0])})"
-                            )
-                        else:
-                            log_and_flush("No active protective order found after rejection - attempting to restore hard stop...")
-                            restored = await self.submit_replacement_hard_stop()
-                            if restored:
-                                log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
-                            else:
-                                log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
+                    if restored:
+                        log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
                     else:
-                        log_and_flush("Attempting to restore hard-stop protection...")
-                        restored = await self.submit_replacement_hard_stop()
-                        if restored:
-                            log_and_flush(f"Hard stop restored. Next upgrade retry after {self.trailing_upgrade_retry_after.strftime('%H:%M:%S ET')}")
-                        else:
-                            log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
+                        log_and_flush("CRITICAL: Hard stop could not be restored automatically. Check Alpaca immediately.")
                     log_and_flush(f"{'='*70}\n")
                     return
                 finally:
@@ -1302,7 +1546,10 @@ class NVDAOpeningRangeBot:
                     'open': float(bar.open),
                     'high': float(bar.high),
                     'low': float(bar.low),
-                    'close': float(bar.close)
+                    'close': float(bar.close),
+                    'volume': float(getattr(bar, 'volume', 0) or 0),
+                    'start_time': period_start_time,
+                    'end_time': period_start_time + timedelta(minutes=5)
                 }
                 self.last_5min_start_time = period_start_time
             elif self.last_5min_start_time is None:
@@ -1311,7 +1558,10 @@ class NVDAOpeningRangeBot:
                     'open': float(bar.open),
                     'high': float(bar.high),
                     'low': float(bar.low),
-                    'close': float(bar.close)
+                    'close': float(bar.close),
+                    'volume': float(getattr(bar, 'volume', 0) or 0),
+                    'start_time': period_start_time,
+                    'end_time': period_start_time + timedelta(minutes=5)
                 }
                 self.last_5min_start_time = period_start_time
             else:
@@ -1319,6 +1569,8 @@ class NVDAOpeningRangeBot:
                 self.current_5min_candle['high'] = max(self.current_5min_candle['high'], float(bar.high))
                 self.current_5min_candle['low'] = min(self.current_5min_candle['low'], float(bar.low))
                 self.current_5min_candle['close'] = float(bar.close)
+                self.current_5min_candle['volume'] += float(getattr(bar, 'volume', 0) or 0)
+                self.current_5min_candle['end_time'] = period_start_time + timedelta(minutes=5)
         
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR in aggregate_5min_candle: {e}")
@@ -1355,7 +1607,12 @@ class NVDAOpeningRangeBot:
                     self.position_entered = True
                     return
                 
-                await self.place_trade_with_stop(LONG_TICKER, OrderSide.BUY, candle_close)
+                await self.place_trade_with_stop(
+                    LONG_TICKER,
+                    OrderSide.BUY,
+                    candle_close,
+                    breakout_candle=dict(self.current_5min_candle)
+                )
             
             # Check if candle BODY is entirely below ORB Low (SHORT)
             # Both open AND close must be below ORB low
@@ -1371,7 +1628,12 @@ class NVDAOpeningRangeBot:
                     self.position_entered = True
                     return
                 
-                await self.place_trade_with_stop(SHORT_TICKER, OrderSide.BUY, candle_close)
+                await self.place_trade_with_stop(
+                    SHORT_TICKER,
+                    OrderSide.BUY,
+                    candle_close,
+                    breakout_candle=dict(self.current_5min_candle)
+                )
             else:
                 # No breakout - just log ORB reference
                 print(f"[{self._get_timestamp_et()}] No breakout (ORB High: ${self.orb_high:.2f}, ORB Low: ${self.orb_low:.2f})")
