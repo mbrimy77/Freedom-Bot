@@ -3,7 +3,7 @@ NVDA 15-Minute Opening Range Breakout (ORB) Strategy
 - Monitors NVDA for 15-min ORB (9:30-9:45 AM ET)
 - Trades NVDL (2x Long) or NVD (2x Short) based on 5-min candle closes
 - Position sizing: 1.5% move = $300 loss on $20k account
-- Dual-stage exit: 1.5% hard stop -> 3% profit triggers 1% trailing stop
+- Dual-stage exit: 1.5% hard stop -> 3% profit triggers 1.5% trailing stop
 - Hard exit at 2:30 PM CST / 3:30 PM ET
 - Maximum one trade per day
 """
@@ -20,6 +20,8 @@ from dotenv import load_dotenv
 
 from alpaca.trading.client import TradingClient
 from alpaca.trading.requests import (
+    GetOrderByIdRequest,
+    GetOrdersRequest,
     MarketOrderRequest,
     StopLossRequest,
     StopOrderRequest,
@@ -42,7 +44,7 @@ ACCOUNT_SIZE = 20000           # $20,000 account
 RISK_AMOUNT = 300              # $300 max loss per trade
 HARD_STOP_PCT = 1.5            # 1.5% hard stop loss
 PROFIT_TARGET_PCT = 3.0        # 3% profit to activate trailing stop
-TRAILING_STOP_PCT = 1.0        # 1% trailing stop after profit target hit
+TRAILING_STOP_PCT = 1.5        # 1.5% trailing stop after profit target hit
 MAX_TRADES_PER_DAY = 1         # Maximum one trade per day
 TRAILING_UPGRADE_RETRY_DELAY_SECONDS = 30
 ORDER_STATE_POLL_SECONDS = 0.5
@@ -715,12 +717,22 @@ class NVDAOpeningRangeBot:
     def get_active_exit_orders(self, symbol):
         """Return open stop and trailing-stop orders for a symbol."""
         exit_orders = []
-        for order in self.trading_client.get_orders():
+        request = GetOrdersRequest(
+            status=QueryOrderStatus.OPEN,
+            nested=False,
+            symbols=[symbol]
+        )
+        for order in self.trading_client.get_orders(filter=request):
             if getattr(order, 'symbol', None) != symbol:
                 continue
             if self._order_type_value(order) in {'stop', 'trailing_stop'}:
                 exit_orders.append(order)
         return exit_orders
+
+    def get_parent_order_with_legs(self, parent_order_id):
+        """Fetch an order with nested legs so child protection orders are visible."""
+        request = GetOrderByIdRequest(nested=True)
+        return self.trading_client.get_order_by_id(parent_order_id, filter=request)
 
     def reset_position_state(self):
         """Clear in-memory state once Alpaca confirms the position is flat."""
@@ -1288,20 +1300,26 @@ class NVDAOpeningRangeBot:
             return False
     
     async def get_child_orders(self, parent_order_id):
-        """Get child orders (stop loss) from bracket order"""
+        """Get the active child stop order created by the OTO entry."""
         try:
             await asyncio.sleep(1)
-            orders = self.trading_client.get_orders()
-            
-            for order in orders:
-                if hasattr(order, 'legs') and order.id == parent_order_id:
-                    for leg in order.legs:
-                        leg_order = self.trading_client.get_order_by_id(leg.id)
-                        if leg_order.order_type.value == 'stop':
-                            self.stop_loss_order_id = leg.id
-                            return self.stop_loss_order_id, leg_order.order_type.value
-            if self.stop_loss_order_id:
-                return self.stop_loss_order_id, "stop"
+
+            parent_order = self.get_parent_order_with_legs(parent_order_id)
+            if hasattr(parent_order, 'legs') and parent_order.legs:
+                for leg in parent_order.legs:
+                    leg_order = self.trading_client.get_order_by_id(leg.id)
+                    if self._order_type_value(leg_order) in {'stop', 'trailing_stop'}:
+                        self.stop_loss_order_id = leg.id
+                        return self.stop_loss_order_id, self._order_type_value(leg_order)
+
+            active_exit_orders = self.get_active_exit_orders(self.entry_ticker)
+            if active_exit_orders:
+                active_exit_orders.sort(key=lambda order: str(order.id))
+                active_order = active_exit_orders[0]
+                self.stop_loss_order_id = active_order.id
+                return active_order.id, self._order_type_value(active_order)
+
+            self.stop_loss_order_id = None
             return None, None
         except Exception as e:
             print(f"[{self._get_timestamp_et()}] ERROR getting child orders: {e}")
@@ -1349,20 +1367,44 @@ class NVDAOpeningRangeBot:
 
                 self.trailing_upgrade_in_progress = True
                 try:
-                    if self.stop_loss_order_id:
-                        log_and_flush(f"Step 1/4: Cancel current hard stop ({self.stop_loss_order_id})")
-                        canceled = await self.cancel_order_and_wait(self.stop_loss_order_id, "Existing hard stop")
-                        if not canceled:
-                            self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
-                            log_and_flush("Trailing-stop upgrade aborted - hard stop is still active")
-                            log_and_flush(
-                                f"Will retry trailing-stop upgrade after "
-                                f"{format_log_timestamp(self.trailing_upgrade_retry_after)}"
-                            )
-                            log_and_flush(f"{'='*70}\n")
-                            return
+                    exit_orders = self.get_active_exit_orders(self.entry_ticker)
+                    if exit_orders:
+                        log_and_flush("Step 1/4: Cancel active protective order(s) before trailing upgrade")
+                        for exit_order in exit_orders:
+                            order_type = self._order_type_value(exit_order)
+                            label = f"Existing {order_type} order {exit_order.id}"
+                            if not await self.cancel_order_and_wait(exit_order.id, label):
+                                self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
+                                log_and_flush("Trailing-stop upgrade aborted - a protective order is still active")
+                                log_and_flush(
+                                    f"Will retry trailing-stop upgrade after "
+                                    f"{format_log_timestamp(self.trailing_upgrade_retry_after)}"
+                                )
+                                log_and_flush(f"{'='*70}\n")
+                                return
+                    else:
+                        log_and_flush("Step 1/4: No active protective order found in Alpaca")
 
-                    log_and_flush("Step 2/4: Submit trailing stop")
+                    log_and_flush("Step 2/4: Verify Alpaca released all reserved shares")
+                    remaining_exit_orders = self.get_active_exit_orders(self.entry_ticker)
+                    if remaining_exit_orders:
+                        self.trailing_upgrade_retry_after = datetime.now(TIMEZONE_ET) + timedelta(seconds=TRAILING_UPGRADE_RETRY_DELAY_SECONDS)
+                        log_and_flush("Trailing-stop upgrade aborted - Alpaca still shows active exit order(s)")
+                        for remaining_order in remaining_exit_orders:
+                            log_and_flush(
+                                f"Still active: {self._order_type_value(remaining_order)} {remaining_order.id}"
+                            )
+                        log_and_flush(
+                            f"Will retry trailing-stop upgrade after "
+                            f"{format_log_timestamp(self.trailing_upgrade_retry_after)}"
+                        )
+                        log_and_flush(f"{'='*70}\n")
+                        return
+
+                    self.stop_loss_order_id = None
+                    log_and_flush("Reserved shares released - safe to submit trailing stop")
+
+                    log_and_flush("Step 3/4: Submit trailing stop")
                     trailing_stop_request = TrailingStopOrderRequest(
                         symbol=self.entry_ticker,
                         qty=self.shares,
@@ -1373,7 +1415,7 @@ class NVDAOpeningRangeBot:
                     
                     trailing_order = self.trading_client.submit_order(trailing_stop_request)
                     log_and_flush(f"Trailing stop submitted - Order ID: {trailing_order.id}")
-                    log_and_flush("Step 3/4: Wait for Alpaca to confirm the trailing stop is active")
+                    log_and_flush("Step 4/4: Wait for Alpaca to confirm the trailing stop is active")
 
                     success, confirmed_order = await self.wait_for_order_status(
                         order_id=trailing_order.id,
