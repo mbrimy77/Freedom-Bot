@@ -336,57 +336,64 @@ class NVDAOpeningRangeBot:
         return datetime.now(TIMEZONE_CST).time()
     
     def is_market_open(self):
-        """Check if market is open (Monday-Friday, 9:30 AM - 4:00 PM ET)"""
-        now_et = datetime.now(TIMEZONE_ET)
-        
-        # Check if weekend
-        if now_et.weekday() >= 5:  # Saturday = 5, Sunday = 6
-            return False
-        
-        # Check if within market hours (9:30 AM - 4:00 PM ET)
-        market_open = time(9, 30)
-        market_close = time(16, 0)
-        
-        if market_open <= now_et.time() <= market_close:
-            return True
-        
-        return False
-    
-    async def wait_for_market_open(self):
-        """Wait until market open instead of exiting the worker."""
-        now_et = datetime.now(TIMEZONE_ET)
-        
-        # Check if weekend
-        if now_et.weekday() >= 5:  # Saturday or Sunday
-            days_until_monday = (7 - now_et.weekday()) % 7
-            if days_until_monday == 0:
-                days_until_monday = 1
-            
-            next_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
-            
-            print(f"[{self._get_timestamp_et()}] Market closed (weekend)")
-            print(f"[{self._get_timestamp_et()}] Next open: Monday {format_log_timestamp(next_open)}")
-            print(f"[{self._get_timestamp_et()}] Waiting for next market open...")
-            await asyncio.sleep((next_open - now_et).total_seconds())
-            print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
-            return True
-        
-        # Check if before market open today
-        market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-        
-        if now_et < market_open_time:
-            wait_seconds = (market_open_time - now_et).total_seconds()
-            print(f"[{self._get_timestamp_et()}] Market opens at 8:30 AM CT")
-            print(f"[{self._get_timestamp_et()}] {wait_seconds:.0f} seconds until open")
+        """Check Alpaca's market clock so holidays are handled automatically."""
+        try:
+            clock = self.trading_client.get_clock()
+            return bool(getattr(clock, 'is_open', False))
+        except Exception as e:
+            log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Could not fetch market clock: {e}")
+            now_et = datetime.now(TIMEZONE_ET)
+            if now_et.weekday() >= 5:
+                return False
 
-            print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for market open...")
-            await asyncio.sleep(wait_seconds)
+            market_open = time(9, 30)
+            market_close = time(16, 0)
+            return market_open <= now_et.time() <= market_close
+
+    async def wait_for_market_open(self):
+        """Wait until Alpaca says the market is open, including holidays."""
+        while True:
+            try:
+                clock = self.trading_client.get_clock()
+                if getattr(clock, 'is_open', False):
+                    print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
+                    return True
+
+                next_open = getattr(clock, 'next_open', None)
+                if next_open is not None:
+                    now_utc = datetime.now(next_open.tzinfo) if next_open.tzinfo else datetime.utcnow()
+                    wait_seconds = max(1, int((next_open - now_utc).total_seconds()))
+                    print(f"[{self._get_timestamp_et()}] Market is closed")
+                    print(f"[{self._get_timestamp_et()}] Next open: {format_log_timestamp(next_open)}")
+                    print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for market open...")
+                    await asyncio.sleep(wait_seconds)
+                    continue
+            except Exception as e:
+                log_and_flush(f"[{self._get_timestamp_et()}] WARNING: Could not fetch market clock: {e}")
+
+            now_et = datetime.now(TIMEZONE_ET)
+            if now_et.weekday() >= 5:  # Saturday = 5, Sunday = 6
+                days_until_monday = (7 - now_et.weekday()) % 7
+                if days_until_monday == 0:
+                    days_until_monday = 1
+                next_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0) + timedelta(days=days_until_monday)
+                print(f"[{self._get_timestamp_et()}] Market closed (weekend)")
+                print(f"[{self._get_timestamp_et()}] Next open: Monday {format_log_timestamp(next_open)}")
+                print(f"[{self._get_timestamp_et()}] Waiting for next market open...")
+                await asyncio.sleep((next_open - now_et).total_seconds())
+                continue
+
+            market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            if now_et < market_open_time:
+                wait_seconds = (market_open_time - now_et).total_seconds()
+                print(f"[{self._get_timestamp_et()}] Market opens at 8:30 AM CT")
+                print(f"[{self._get_timestamp_et()}] {wait_seconds:.0f} seconds until open")
+                print(f"[{self._get_timestamp_et()}] Waiting {wait_seconds:.0f} seconds for market open...")
+                await asyncio.sleep(wait_seconds)
+                continue
+
             print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
             return True
-        
-        # Market is open!
-        print(f"[{self._get_timestamp_et()}] Market is open - ready to trade")
-        return True
     
     async def handle_nvda_bar(self, bar):
         """Handle incoming 1-minute NVDA bars for ORB tracking and 5-min aggregation"""
