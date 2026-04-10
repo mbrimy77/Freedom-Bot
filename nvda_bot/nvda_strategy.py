@@ -12,6 +12,7 @@ import asyncio
 import os
 import sys
 import random
+from time import monotonic
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -47,6 +48,10 @@ MAX_TRADES_PER_DAY = 1         # Maximum one trade per day
 TRAILING_UPGRADE_RETRY_DELAY_SECONDS = 30
 ORDER_STATE_POLL_SECONDS = 0.5
 ORDER_STATE_TIMEOUT_SECONDS = 8
+# Entry: wait for full fill instead of canceling remainder after a short sleep (DAY market
+# orders usually complete; paper/live can be slow for larger size).
+ENTRY_FILL_POLL_INTERVAL_SECONDS = 0.5
+ENTRY_FILL_TIMEOUT_SECONDS = 120
 EXIT_ORDER_CLEAR_TIMEOUT_SECONDS = 12
 POSITION_CLOSE_TIMEOUT_SECONDS = 20
 END_OF_DAY_CLOSE_RETRY_SECONDS = 15
@@ -604,6 +609,24 @@ class NVDAOpeningRangeBot:
         log_and_flush(f"WARNING: Timed out waiting for {label} (last status: {last_status})")
         return False, last_order
 
+    async def wait_for_entry_order_resolution(self, order_id, timeout_seconds=ENTRY_FILL_TIMEOUT_SECONDS):
+        """
+        Poll the OTO entry order until fully filled or a terminal status.
+        DAY market orders often complete shortly after submit; canceling the remainder
+        after only a few seconds caused routine partial fills on larger size.
+        """
+        deadline = monotonic() + timeout_seconds
+        last_order = None
+        while monotonic() < deadline:
+            last_order = self.trading_client.get_order_by_id(order_id)
+            order_status = self._order_status_value(last_order)
+            if order_status == "filled":
+                return last_order
+            if order_status in ("canceled", "cancelled", "rejected", "expired"):
+                return last_order
+            await asyncio.sleep(ENTRY_FILL_POLL_INTERVAL_SECONDS)
+        return self.trading_client.get_order_by_id(order_id)
+
     async def cancel_order_and_wait(self, order_id, label):
         """Cancel an order and wait for Alpaca to release the reserved shares."""
         try:
@@ -1021,11 +1044,8 @@ class NVDAOpeningRangeBot:
             order = self.trading_client.submit_order(order_data)
             log_and_flush(f"[{self._get_timestamp_et()}] Order submitted - Order ID: {order.id}")
             
-            # Wait for order to fill and verify
-            await asyncio.sleep(3)
-            
-            # Check order status
-            filled_order = self.trading_client.get_order_by_id(order.id)
+            # Wait for full fill (or terminal state); do not cancel remainder after ~3s
+            filled_order = await self.wait_for_entry_order_resolution(order.id)
             order_status = self._order_status_value(filled_order)
             filled_qty = float(getattr(filled_order, 'filled_qty', 0) or 0)
             filled_avg_price = getattr(filled_order, 'filled_avg_price', None)
@@ -1085,7 +1105,9 @@ class NVDAOpeningRangeBot:
                 log_and_flush(f"Shares Filled: {int(filled_qty)}")
                 log_and_flush(f"Unfilled Shares: {int(shares - filled_qty)}")
                 log_and_flush(f"Fill Price: ${actual_fill_price:.2f}")
-                log_and_flush(f"Status After 3s Check: {order_status.upper()}")
+                log_and_flush(
+                    f"Status After {ENTRY_FILL_TIMEOUT_SECONDS}s fill wait: {order_status.upper()}"
+                )
 
                 cancel_ok = await self.cancel_order_and_wait(order.id, "Unfilled entry remainder")
                 if not cancel_ok:
@@ -1140,7 +1162,9 @@ class NVDAOpeningRangeBot:
                             actual_qty
                         )
                         await self.cancel_active_exit_orders(ticker, "Timed-out entry")
-                        await self.close_all_positions(f"ENTRY TIMED OUT AFTER 3 SECONDS - FLATTENING {ticker}")
+                        await self.close_all_positions(
+                            f"ENTRY NOT FILLED AFTER {ENTRY_FILL_TIMEOUT_SECONDS}s - FLATTENING {ticker}"
+                        )
                 except Exception as position_error:
                     if not is_missing_position_error(position_error):
                         log_and_flush(f"[{self._get_timestamp_et()}] WARNING checking for leftover shares after timeout: {position_error}")
