@@ -2,8 +2,8 @@
 NVDA 15-Minute Opening Range Breakout (ORB) Strategy
 - Monitors NVDA for 15-min ORB (9:30-9:45 AM ET)
 - Trades NVDL (2x Long) or NVD (2x Short) based on 5-min candle closes
-- Position sizing: 1.5% move = $300 loss on $20k account
-- Dual-stage exit: 1.5% hard stop -> 3% profit triggers 1% trailing stop
+- Position sizing: 2% hard stop ≈ $400 loss on $20k full notional
+- Dual-stage exit: 2% hard stop -> 3% profit triggers 1.5% trailing stop
 - Hard exit at 2:30 PM CST / 3:30 PM ET
 - Maximum one trade per day
 """
@@ -40,10 +40,10 @@ MONITOR_TICKER = "NVDA"        # Ticker to monitor for signals
 LONG_TICKER = "NVDL"           # 2x Long ETF
 SHORT_TICKER = "NVD"           # 2x Short ETF
 ACCOUNT_SIZE = 20000           # $20,000 account
-RISK_AMOUNT = 300              # $300 max loss per trade
-HARD_STOP_PCT = 1.5            # 1.5% hard stop loss
+RISK_AMOUNT = 400              # $400 max loss per trade (aligned with 2% stop on ~$20k notional)
+HARD_STOP_PCT = 2.0            # 2% hard stop loss (Alpaca stop orders use this %)
 PROFIT_TARGET_PCT = 3.0        # 3% profit to activate trailing stop
-TRAILING_STOP_PCT = 1.0        # 1% trailing stop after profit target hit
+TRAILING_STOP_PCT = 1.5        # 1.5% trailing stop after profit target hit (Alpaca trailing orders)
 MAX_TRADES_PER_DAY = 1         # Maximum one trade per day
 TRAILING_UPGRADE_RETRY_DELAY_SECONDS = 30
 ORDER_STATE_POLL_SECONDS = 0.5
